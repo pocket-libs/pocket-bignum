@@ -40,7 +40,10 @@ make test                  # everything below
 make test64 test32 testportable   # mpz fuzz vs GMP (64-bit limbs, 32-bit limbs, pure C)
 make testqf                # mpq fuzz vs GMP + mpfr fuzz vs MPFR, same three builds
 make testcompat            # program written against <gmp.h> names
+make testthresholds        # fuzz with tiny thresholds: Karatsuba, Toom-3 & divide-and-conquer
+                           # radix conversion on almost every operation
 make bench                 # timings vs GMP / MPFR
+make bench-ruby            # timings vs Ruby's Integer (needs ruby)
 ```
 
 Fuzzers run under ASan + UBSan and compare every result, ternary value and aliasing

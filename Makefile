@@ -8,9 +8,13 @@ SAN      = -fsanitize=address,undefined -fno-omit-frame-pointer
 ITERS   ?= 20000
 SEED    ?= 1
 
+# tiny thresholds: Karatsuba, Toom-3 & divide-and-conquer radix conversion on almost every operation
+SMALLTHR = -DPBN_MUL_KARA_THRESHOLD=2 -DPBN_SQR_KARA_THRESHOLD=2 -DPBN_MUL_TOOM3_THRESHOLD=5 -DPBN_SQR_TOOM3_THRESHOLD=5 \
+           -DPBN_GET_STR_DC_THRESHOLD=2 -DPBN_SET_STR_DC_THRESHOLD=1
+
 BUILD = build
 
-.PHONY: all test test64 test32 testportable testqf testcompat arturo-check bench clean
+.PHONY: all test test64 test32 testportable testqf testcompat testthresholds arturo-check bench bench-ruby clean
 
 all: test
 
@@ -35,6 +39,15 @@ $(BUILD)/fuzzqf32: tests/fuzz_qf.c pocketbignum.h | $(BUILD)
 $(BUILD)/fuzzqfportable: tests/fuzz_qf.c pocketbignum.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) -DPBN_PORTABLE $(GMPINC) $< -o $@ $(MPFRLIB) -lm
 
+$(BUILD)/fuzzthr: tests/fuzz.c pocketbignum.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) $(SMALLTHR) $(GMPINC) $< -o $@ $(GMPLIB) -lm
+
+$(BUILD)/fuzzqfthr: tests/fuzz_qf.c pocketbignum.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) $(SMALLTHR) $(GMPINC) $< -o $@ $(MPFRLIB) -lm
+
+$(BUILD)/bench_ops: tests/bench_ops.c pocketbignum.h | $(BUILD)
+	$(CC) -O3 -std=c99 -DNDEBUG $< -o $@ -lm
+
 $(BUILD)/bench: tests/bench.c pocketbignum.h | $(BUILD)
 	$(CC) -O3 -std=c99 -DNDEBUG $(GMPINC) $< -o $@ $(GMPLIB) -lm
 
@@ -56,12 +69,16 @@ testportable: $(BUILD)/fuzzportable
 testcompat: $(BUILD)/compat
 	./$(BUILD)/compat
 
+testthresholds: $(BUILD)/fuzzthr $(BUILD)/fuzzqfthr
+	./$(BUILD)/fuzzthr $(ITERS) $(SEED)
+	./$(BUILD)/fuzzqfthr $(ITERS) $(SEED)
+
 testqf: $(BUILD)/fuzzqf64 $(BUILD)/fuzzqf32 $(BUILD)/fuzzqfportable
 	./$(BUILD)/fuzzqf64 $(ITERS) $(SEED)
 	./$(BUILD)/fuzzqf32 $(ITERS) $(SEED)
 	./$(BUILD)/fuzzqfportable $(ITERS) $(SEED)
 
-test: test64 test32 testportable testqf testcompat
+test: test64 test32 testportable testqf testcompat testthresholds
 
 arturo-check:
 	./tools/check_arturo_surface.sh $(ARTURO)
@@ -69,6 +86,12 @@ arturo-check:
 bench: $(BUILD)/bench $(BUILD)/bench_qf
 	./$(BUILD)/bench
 	./$(BUILD)/bench_qf
+
+# PocketBignum vs Ruby's Integer (mul, sqr, sqrt, get_str, set_str at large sizes)
+bench-ruby: $(BUILD)/bench_ops
+	./$(BUILD)/bench_ops > $(BUILD)/ops-pbn.txt
+	ruby tests/bench_ops.rb > $(BUILD)/ops-ruby.txt
+	python3 tools/compare_ops.py $(BUILD)/ops-pbn.txt $(BUILD)/ops-ruby.txt
 
 clean:
 	rm -rf $(BUILD)
