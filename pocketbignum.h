@@ -2188,48 +2188,189 @@ static pbn_limb pbn_sqrt_limb(pbn_limb v) {
     return q;
 }
 
+/* ---- square root: Zimmermann's "Karatsuba square root", directly on limbs
+        (Brent & Zimmermann, Modern Computer Arithmetic, Algorithm 1.12) ---- */
+
+/* approximately (dh:dl) / (2s), clamped well below 2^(B-1) (only ever small in practice) */
+static pbn_limb pbn_sqrt_corr(pbn_limb dh, pbn_limb dl, pbn_limb s) {
+    double q = (ldexp((double)dh, PBN_B) + (double)dl) / (2.0 * (double)s);
+    double cap = ldexp(1.0, PBN_B - 2);
+    return q < cap ? (pbn_limb)q : (pbn_limb)cap;
+}
+
+/* root of a normalized 2-limb number a1:a0 (a1 >= B/4); the remainder a - s^2 <= 2s
+   goes to *rhi:*rlo (*rhi is 0 or 1) */
+static pbn_limb pbn_sqrtrem2(pbn_limb *rlo, pbn_limb *rhi, pbn_limb a1, pbn_limb a0) {
+    pbn_limb s, hi, lo, dh, dl, q;
+    double est = sqrt(ldexp((double)a1, PBN_B) + (double)a0);
+    /* estimate (good to ~2^12 with 64-bit limbs; correctness doesn't depend on it) */
+    s = est >= ldexp(1.0, PBN_B) ? PBN_LIMB_MAX : (pbn_limb)est;
+    if (s < PBN_HIGHBIT) s = PBN_HIGHBIT;
+    /* one Newton correction: s += (a - s^2) / (2s); |a - s^2| is small here, and an
+       approximate (floating-point) quotient is enough: the adjustment below is exact */
+    lo = pbn_umul(s, s, &hi);
+    if (hi > a1 || (hi == a1 && lo > a0)) {
+        dl = lo - a0;
+        dh = hi - a1 - (lo < a0);
+        q = pbn_sqrt_corr(dh, dl, s);
+        s = s - q < PBN_HIGHBIT || s - q > s ? PBN_HIGHBIT : s - q;
+    } else {
+        dl = a0 - lo;
+        dh = a1 - hi - (a0 < lo);
+        q = pbn_sqrt_corr(dh, dl, s);
+        s = s + q < s ? PBN_LIMB_MAX : s + q;
+    }
+    /* exact adjustment (a couple of steps at most) */
+    for (;;) {
+        lo = pbn_umul(s, s, &hi);
+        if (hi > a1 || (hi == a1 && lo > a0)) s--; else break;
+    }
+    while (s != PBN_LIMB_MAX) {
+        pbn_limb s1 = s + 1;
+        lo = pbn_umul(s1, s1, &hi);
+        if (hi < a1 || (hi == a1 && lo <= a0)) s = s1; else break;
+    }
+    lo = pbn_umul(s, s, &hi);
+    *rlo = a0 - lo;
+    *rhi = a1 - hi - (a0 < lo);
+    return s;
+}
+
+/* sp[0..n) = floor(sqrt(a)), rp[0..n) = low limbs of a - s^2 (the high limb, 0 or 1,
+   is returned), for a normalized 2n-limb a (ap[2n-1] >= B/4).
+   tp: scratch of PBN_SQRT_ITCH(n) limbs; nothing may overlap */
+#define PBN_SQRT_ITCH(n) (4 * (n) + 64)
+
+static pbn_limb pbn_n_sqrtrem(pbn_limb *sp, pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
+    pbn_size l, h;
+    pbn_limb *x, *qp, *q2, rc, lb, uc;
+    int hi;
+
+    if (n == 1) {
+        pbn_limb rh;
+        sp[0] = pbn_sqrtrem2(&rp[0], &rh, ap[1], ap[0]);
+        return rh;
+    }
+
+    /* a = ahi*B^(2l) + a1*B^l + a0, with ahi of 2h limbs (h >= l) */
+    l = n / 2;
+    h = n - l;
+    x = tp;
+    qp = x + n;
+    q2 = qp + l + 1;
+
+    /* (s1, r1) = sqrtrem(ahi): s1 -> sp[l..n), r1 -> rp[l..n) + rc */
+    rc = pbn_n_sqrtrem(sp + l, rp + l, ap + 2 * l, h, tp);    /* tp isn't live yet */
+
+    /* (q, u) = divrem(r1*B^l + a1, 2*s1), computed as (X >> 1) / s1:
+       q = floor(X/(2 s1)) = floor(floor(X/2)/s1), u = 2*(X/2 mod s1) + (X & 1) */
+    pbn_n_copy(x, ap + l, l);
+    pbn_n_copy(x + l, rp + l, h);
+    lb = x[0] & 1;
+    pbn_n_rshift(x, x, n, 1);
+    x[n - 1] |= rc << (PBN_B - 1);
+    pbn_n_tdiv_qr(qp, rp + l, x, n, sp + l, h);           /* qp: l+1 limbs, R: h limbs */
+    uc = pbn_n_lshift(rp + l, rp + l, h, 1);
+    rp[l] |= lb;
+
+    /* s = s1*B^l + q, where q <= B^l */
+    pbn_n_copy(sp, qp, l);
+    if (qp[l]) pbn_n_add_1(sp + l, sp + l, h, 1);
+
+    /* r = u*B^l + a0 - q^2 */
+    pbn_n_copy(rp, ap, l);
+    hi = (int)uc;
+    if (qp[l]) {
+        /* q = B^l: q^2 = B^(2l) */
+        if (2 * l < n) hi -= (int)pbn_n_sub_1(rp + 2 * l, rp + 2 * l, n - 2 * l, 1);
+        else           hi -= 1;
+    } else {
+        pbn_n_sqr(q2, qp, l);
+        hi -= (int)pbn_n_sub(rp, rp, n, q2, 2 * l);
+    }
+
+    /* at most one correction: r += 2s - 1, s -= 1 */
+    if (hi < 0) {
+        hi += (int)pbn_n_add_n(rp, rp, sp, n);
+        hi += (int)pbn_n_add_n(rp, rp, sp, n);
+        hi -= (int)pbn_n_sub_1(rp, rp, n, 1);
+        pbn_n_sub_1(sp, sp, n, 1);
+    }
+    return (pbn_limb)hi;
+}
+
 PBN_DEF void pbz_sqrtrem(pbz_ptr s, pbz_ptr r, pbz_srcptr x) {
-    pbz_t n, a, t;
-    pbn_bitcnt c, e, d;
-    int sb;
-    if (SIZ(x) < 0) PBN_ABORT("square root of negative number");
-    if (SIZ(x) == 0) {
+    pbn_size xn = SIZ(x), N, t, sn, rn, total;
+    pbn_limb *buf, *ap, *sp, *rp, *tp, *xc, rh;
+    unsigned k, sh;
+    PBN_TMP_DECL(tb);
+
+    if (xn < 0) PBN_ABORT("square root of negative number");
+    if (xn == 0) {
         if (s) SIZ(s) = 0;
         if (r) SIZ(r) = 0;
         return;
     }
-    if (SIZ(x) == 1) {
+    if (xn == 1) {
         pbn_limb v = PTR(x)[0], q = pbn_sqrt_limb(v);
-        if (r) { pbn_limb *rp = PBZ_GROW(r, 1); rp[0] = v - q * q; SIZ(r) = rp[0] != 0; }
-        if (s) { pbn_limb *sp = PBZ_GROW(s, 1); sp[0] = q; SIZ(s) = 1; }
+        if (r) { pbn_limb *o = PBZ_GROW(r, 1); o[0] = v - q * q; SIZ(r) = o[0] != 0; }
+        if (s) { pbn_limb *o = PBZ_GROW(s, 1); o[0] = q; SIZ(s) = 1; }
         return;
     }
-    /* precision-doubling Newton iteration (as in CPython's math.isqrt):
-       each step refines a to an approximation of sqrt(n >> 2(c-d)) */
-    pbz_init_set(n, x);
-    pbz_init(a);
-    pbz_init(t);
-    c = (pbz_bitlen(n) - 1) / 2;
-    sb = 0;
-    while ((c >> sb) > 1) sb++;
-    pbz_set_ui(a, 1);
-    d = 0;
-    for (; sb >= 0; sb--) {
-        e = d;
-        d = c >> sb;
-        pbz_tdiv_q_2exp(t, n, 2 * c - e - d + 1);
-        pbz_tdiv_q(t, t, a);
-        pbz_mul_2exp(a, a, d - e - 1);
-        pbz_add(a, a, t);
+
+    /* normalize: a = x * 4^k * B^t, with an even number of limbs (2N) and ap[2N-1] >= B/4 */
+    N = (xn + 1) / 2;
+    t = 2 * N - xn;
+    k = (unsigned)pbn_clz(PTR(x)[xn - 1]) / 2;
+    sh = k + (unsigned)t * (PBN_B / 2);                    /* root of x = root of a >> sh */
+
+    total = 2 * N + N + N + PBN_SQRT_ITCH(N) + (sh ? xn : 0);
+    buf = PBN_TMP_GET(tb, total);
+    ap = buf;
+    sp = ap + 2 * N;
+    rp = sp + N;
+    tp = rp + N;
+    xc = tp + PBN_SQRT_ITCH(N);
+
+    if (t) ap[0] = 0;
+    pbn_n_copy(ap + t, PTR(x), xn);
+    if (sh) pbn_n_copy(xc, PTR(x), xn);                    /* x may alias s or r */
+    if (k) pbn_n_lshift(ap, ap, 2 * N, 2 * k);
+
+    rh = pbn_n_sqrtrem(sp, rp, ap, N, tp);
+
+    sn = N;
+    if (sh) {
+        pbn_n_rshift(sp, sp, N, sh);
+        PBN_NORM(sp, sn);
     }
-    pbz_mul(t, a, a);
-    if (pbz_cmp(t, n) > 0) {
-        pbz_sub_ui(a, a, 1);
-        pbz_mul(t, a, a);
+
+    if (r) {
+        pbn_limb *o;
+        if (!sh) {
+            rn = N;
+            o = PBZ_GROW(r, N + 1);
+            pbn_n_copy(o, rp, N);
+            if (rh) o[rn++] = 1;
+        } else {
+            /* r = x - s^2 (s^2 <= x, at most xn limbs once normalized) */
+            pbn_limb *s2 = ap;                              /* 2N >= 2*sn limbs, free now */
+            pbn_size s2n = 2 * sn;
+            pbn_n_sqr(s2, sp, sn);
+            PBN_NORM(s2, s2n);
+            o = PBZ_GROW(r, xn);
+            pbn_n_sub(o, xc, xn, s2, s2n);
+            rn = xn;
+        }
+        PBN_NORM(o, rn);
+        SIZ(r) = (int)rn;
     }
-    if (r) pbz_sub(r, n, t);
-    if (s) pbz_swap(s, a);
-    pbz_clears(n, a, t, (pbz_ptr)NULL);
+    if (s) {
+        pbn_limb *o = PBZ_GROW(s, sn);
+        pbn_n_copy(o, sp, sn);
+        SIZ(s) = (int)sn;
+    }
+    PBN_TMP_PUT(tb, buf, total);
 }
 
 PBN_DEF void pbz_sqrt(pbz_ptr r, pbz_srcptr x) { pbz_sqrtrem(r, NULL, x); }
