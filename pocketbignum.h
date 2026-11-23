@@ -539,6 +539,73 @@ PBN_INLINE int pbn_popcount_limb(pbn_limb x) {
 #endif
 }
 
+/* add/subtract with carry: compiler builtins (clang, gcc >= 14) or MSVC intrinsics where
+   available, else a double-limb or plain C formulation */
+#if !defined(PBN_PORTABLE) && defined(__has_builtin)
+#  if PBN_B == 64 && __has_builtin(__builtin_addcll) && __has_builtin(__builtin_subcll)
+#    define PBN_ADDC_BUILTIN 1
+#  elif PBN_B == 32 && __has_builtin(__builtin_addc) && __has_builtin(__builtin_subc)
+#    define PBN_ADDC_BUILTIN 1
+#  endif
+#endif
+
+/* a + b + cin (cin: 0/1); carry out (0/1) to *cout */
+PBN_INLINE pbn_limb pbn_addc(pbn_limb a, pbn_limb b, pbn_limb cin, pbn_limb *cout) {
+#if defined(PBN_ADDC_BUILTIN) && PBN_B == 64
+    unsigned long long c;
+    pbn_limb s = __builtin_addcll(a, b, cin, &c);
+    *cout = (pbn_limb)c;
+    return s;
+#elif defined(PBN_ADDC_BUILTIN)
+    unsigned int c;
+    pbn_limb s = __builtin_addc(a, b, cin, &c);
+    *cout = (pbn_limb)c;
+    return s;
+#elif defined(PBN_MSVC64) && defined(_M_X64)
+    unsigned __int64 s;
+    *cout = _addcarry_u64((unsigned char)cin, a, b, &s);
+    return s;
+#elif defined(PBN_HAVE_DLIMB)
+    pbn_dlimb t = (pbn_dlimb)a + b + cin;
+    *cout = (pbn_limb)(t >> PBN_B);
+    return (pbn_limb)t;
+#else
+    pbn_limb s = a + b, c = s < a;
+    s += cin;
+    c += s < cin;
+    *cout = c;
+    return s;
+#endif
+}
+
+/* a - b - bin (bin: 0/1); borrow out (0/1) to *bout */
+PBN_INLINE pbn_limb pbn_subb(pbn_limb a, pbn_limb b, pbn_limb bin, pbn_limb *bout) {
+#if defined(PBN_ADDC_BUILTIN) && PBN_B == 64
+    unsigned long long c;
+    pbn_limb d = __builtin_subcll(a, b, bin, &c);
+    *bout = (pbn_limb)c;
+    return d;
+#elif defined(PBN_ADDC_BUILTIN)
+    unsigned int c;
+    pbn_limb d = __builtin_subc(a, b, bin, &c);
+    *bout = (pbn_limb)c;
+    return d;
+#elif defined(PBN_MSVC64) && defined(_M_X64)
+    unsigned __int64 d;
+    *bout = _subborrow_u64((unsigned char)bin, a, b, &d);
+    return d;
+#elif defined(PBN_HAVE_DLIMB)
+    pbn_dlimb t = (pbn_dlimb)a - b - bin;
+    *bout = (pbn_limb)(t >> PBN_B) & 1;
+    return (pbn_limb)t;
+#else
+    pbn_limb d = a - b, c = a < b;
+    c += d < bin;
+    *bout = c;
+    return d - bin;
+#endif
+}
+
 /* ------------------------------------------------------------------------- */
 /* errors & memory                                                           */
 /* ------------------------------------------------------------------------- */
@@ -621,30 +688,28 @@ static int pbn_n_cmp2(const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_s
 }
 
 static pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
-    pbn_size i;
+    pbn_size i = 0;
     pbn_limb cy = 0;
-    for (i = 0; i < n; i++) {
-        pbn_limb a = ap[i], s = a + bp[i];
-        pbn_limb c = s < a;
-        s += cy;
-        c += s < cy;
-        rp[i] = s;
-        cy = c;
+    for (; i + 4 <= n; i += 4) {
+        rp[i]     = pbn_addc(ap[i],     bp[i],     cy, &cy);
+        rp[i + 1] = pbn_addc(ap[i + 1], bp[i + 1], cy, &cy);
+        rp[i + 2] = pbn_addc(ap[i + 2], bp[i + 2], cy, &cy);
+        rp[i + 3] = pbn_addc(ap[i + 3], bp[i + 3], cy, &cy);
     }
+    for (; i < n; i++) rp[i] = pbn_addc(ap[i], bp[i], cy, &cy);
     return cy;
 }
 
 static pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
-    pbn_size i;
+    pbn_size i = 0;
     pbn_limb bw = 0;
-    for (i = 0; i < n; i++) {
-        pbn_limb a = ap[i], b = bp[i];
-        pbn_limb d = a - b;
-        pbn_limb c = a < b;
-        c += d < bw;
-        rp[i] = d - bw;
-        bw = c;
+    for (; i + 4 <= n; i += 4) {
+        rp[i]     = pbn_subb(ap[i],     bp[i],     bw, &bw);
+        rp[i + 1] = pbn_subb(ap[i + 1], bp[i + 1], bw, &bw);
+        rp[i + 2] = pbn_subb(ap[i + 2], bp[i + 2], bw, &bw);
+        rp[i + 3] = pbn_subb(ap[i + 3], bp[i + 3], bw, &bw);
     }
+    for (; i < n; i++) rp[i] = pbn_subb(ap[i], bp[i], bw, &bw);
     return bw;
 }
 
