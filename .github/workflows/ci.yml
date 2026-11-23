@@ -29,7 +29,7 @@ jobs:
                     - { name: macos-arm64,       os: macos-latest,     cc: clang }
                     - { name: macos-amd64,       os: macos-15-intel,   cc: clang }
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
             - name: Install GMP & MPFR (Linux)
               if: runner.os == 'Linux'
@@ -60,7 +60,7 @@ jobs:
             run:
                 shell: msys2 {0}
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
             - uses: msys2/setup-msys2@v2
               with:
@@ -86,21 +86,15 @@ jobs:
                     - { arch: amd64, os: windows-latest,  vcarch: x64   }
                     - { arch: arm64, os: windows-11-arm,  vcarch: arm64 }
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
-            - uses: ilammy/msvc-dev-cmd@v1
-              with:
-                arch: ${{ matrix.vcarch }}
-
-            - name: Build library
+            - name: Build library & compat smoke test
               shell: cmd
               run: |
+                for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do set "VSDIR=%%i"
+                call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcarch }} || exit /b 1
                 cl /nologo /W3 /O2 /c pocketbignum.c /Fo:pbn.obj || exit /b 1
                 cl /nologo /W3 /O2 /DPBN_PORTABLE /c pocketbignum.c /Fo:pbn_portable.obj || exit /b 1
-
-            - name: Compat smoke test
-              shell: cmd
-              run: |
                 cl /nologo /W3 /O2 /Icompat tests\compat_smoke.c /Fe:compat.exe || exit /b 1
                 compat.exe || exit /b 1
                 cl /nologo /W3 /O2 /DPBN_PORTABLE /Icompat tests\compat_smoke.c /Fe:compat_portable.exe || exit /b 1
@@ -111,7 +105,7 @@ jobs:
         name: test (linux-i386)
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
             - name: Install multilib
               run: |
@@ -131,10 +125,10 @@ jobs:
         name: arturo surface
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
 
             - name: Checkout Arturo
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                 repository: arturo-lang/arturo
                 path: arturo
