@@ -2579,9 +2579,41 @@ static void pbn_tc(pbn_limb *rp, pbz_srcptr x, pbn_size n) {
 }
 
 static void pbz_bitop(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int op) {
-    pbn_size an = PBN_ABS(SIZ(a)), bn = PBN_ABS(SIZ(b)), n = PBN_MAX(an, bn) + 1, i;
+    pbn_size an = PBN_ABS(SIZ(a)), bn = PBN_ABS(SIZ(b)), n, i, total;
     int aneg = SIZ(a) < 0, bneg = SIZ(b) < 0, rneg;
-    pbn_limb *tp = PBN_TMP_ALLOC(2 * n), *ta = tp, *tb = tp + n;
+    pbn_limb *tp, *ta, *tb, *rp;
+    PBN_TMP_DECL(tbuf);
+
+    if (!aneg && !bneg) {
+        /* both non-negative: no two's complement needed */
+        const pbn_limb *ap, *bp;
+        if (an < bn) {
+            pbz_srcptr x = a; a = b; b = x;
+            n = an; an = bn; bn = n;
+        }
+        if (op == PBN_AND) {
+            rp = PBZ_GROW(r, bn);
+            ap = PTR(a); bp = PTR(b);
+            for (i = 0; i < bn; i++) rp[i] = ap[i] & bp[i];
+            n = bn;
+        } else {
+            rp = PBZ_GROW(r, an);
+            ap = PTR(a); bp = PTR(b);
+            if (op == PBN_IOR) for (i = 0; i < bn; i++) rp[i] = ap[i] | bp[i];
+            else               for (i = 0; i < bn; i++) rp[i] = ap[i] ^ bp[i];
+            pbn_n_copy(rp + bn, ap + bn, an - bn);
+            n = an;
+        }
+        PBN_NORM(rp, n);
+        SIZ(r) = (int)n;
+        return;
+    }
+
+    n = PBN_MAX(an, bn) + 1;
+    total = 2 * n;
+    tp = PBN_TMP_GET(tbuf, total);
+    ta = tp;
+    tb = tp + n;
     rneg = op == PBN_AND ? (aneg & bneg) : op == PBN_IOR ? (aneg | bneg) : (aneg ^ bneg);
     pbn_tc(ta, a, n);
     pbn_tc(tb, b, n);
@@ -2592,8 +2624,10 @@ static void pbz_bitop(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int op) {
     }
     if (rneg) pbn_n_neg(ta, ta, n);
     PBN_NORM(ta, n);
-    pbz_install(r, tp, 2 * PBN_MAX(an, bn) + 2);
+    rp = PBZ_GROW(r, n);
+    pbn_n_copy(rp, ta, n);
     SIZ(r) = (int)(rneg ? -n : n);
+    PBN_TMP_PUT(tbuf, tp, total);
 }
 
 PBN_DEF void pbz_and(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_bitop(r, a, b, PBN_AND); }
