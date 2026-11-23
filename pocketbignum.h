@@ -1099,8 +1099,11 @@ static pbn_size pbn_from_ul(pbn_limb *buf, unsigned long u) {
     pbn_size n = 0;
     while (u) {
         buf[n++] = (pbn_limb)u;
-        if (sizeof(unsigned long) * CHAR_BIT > PBN_B) u = (u >> (PBN_B / 2)) >> (PBN_B / 2);
-        else u = 0;
+#if ULONG_MAX > 0xFFFFFFFFUL && PBN_LIMB_BITS == 32
+        u = (u >> 16) >> 16;   /* 64-bit long, 32-bit limbs: more limbs to go */
+#else
+        u = 0;                 /* unsigned long fits in one limb */
+#endif
     }
     return n;
 }
