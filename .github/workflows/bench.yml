@@ -5,8 +5,15 @@ on:
         branches: [main]
         paths:
             - 'pocketbignum.h'
-            - 'tests/bench*.c'
-            - 'tools/bench_summary.py'
+            - 'tests/bench*'
+            - 'tools/bench_*.py'
+            - 'Makefile'
+            - '.github/workflows/bench.yml'
+    pull_request:
+        paths:
+            - 'pocketbignum.h'
+            - 'tests/bench*'
+            - 'tools/bench_*.py'
             - 'Makefile'
             - '.github/workflows/bench.yml'
     workflow_dispatch:
@@ -14,15 +21,19 @@ on:
             runs:
                 description: 'Runs per benchmark (medians are reported)'
                 default: '5'
+            base:
+                description: 'Branch / commit to compare against'
+                default: 'main'
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 jobs:
-    # Micro-benchmarks vs GMP / MPFR (same process, same inputs, see tests/bench*.c),
-    # repeated several times (alternating the two programs) to filter out runner noise;
-    # medians + ratio spread end up in the job summary
+    # The build under test ("head") and the one it's compared to ("base": the PR's base,
+    # the previous main for pushes, or the given ref) are built and run in the same job,
+    # interleaved, so both see the same machine. Summary: head vs base per row, then
+    # head vs GMP / MPFR (micro-benchmarks in tests/bench*.c).
     bench:
         name: bench (${{ matrix.name }})
         runs-on: ${{ matrix.os }}
@@ -38,6 +49,8 @@ jobs:
             RUNS: ${{ github.event.inputs.runs || '5' }}
         steps:
             - uses: actions/checkout@v6
+              with:
+                fetch-depth: 0
 
             - name: Install GMP & MPFR (Linux)
               if: runner.os == 'Linux'
@@ -57,9 +70,34 @@ jobs:
                 echo "CPU=$(sysctl -n machdep.cpu.brand_string) ($(sysctl -n hw.ncpu) cores)" >> "$GITHUB_ENV"
                 echo "RUNNER=" >> "$GITHUB_ENV"
 
+            - name: Pick the base
+              run: |
+                case "${{ github.event_name }}" in
+                    pull_request) BASE="${{ github.event.pull_request.base.sha }}" ;;
+                    push)         BASE="${{ github.event.before }}" ;;
+                    *)            BASE="$(git rev-parse --verify -q "origin/${{ github.event.inputs.base }}" || git rev-parse --verify -q "${{ github.event.inputs.base }}" || true)" ;;
+                esac
+                if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || [ "$BASE" = "$(git rev-parse HEAD)" ] \
+                   || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+                    echo "no base to compare with"
+                    BASE=""
+                else
+                    git worktree add --detach base "$BASE"
+                fi
+                echo "BASE=$BASE" >> "$GITHUB_ENV"
+
             - name: Build
               run: |
-                make build/bench build/bench_qf GMP="$GMP_PREFIX"
+                PROGS=""
+                for p in bench bench_qf bench_ops bench_small; do
+                    make "build/$p" GMP="$GMP_PREFIX" >/dev/null 2>&1 || continue
+                    if [ -n "$BASE" ]; then
+                        make -C base "build/$p" GMP="$GMP_PREFIX" >/dev/null 2>&1 || { echo "$p: not in the base, head only"; [ "$p" = bench ] || [ "$p" = bench_qf ] || continue; }
+                    fi
+                    PROGS="$PROGS $p"
+                done
+                echo "programs:$PROGS"
+                echo "PROGS=$PROGS" >> "$GITHUB_ENV"
                 echo "CCVER=$(cc --version | head -1)" >> "$GITHUB_ENV"
 
             - name: Warm up
@@ -69,17 +107,31 @@ jobs:
 
             - name: Run
               run: |
-                mkdir -p results
+                mkdir -p results gmp
+                args() { [ "$1" = bench_ops ] && echo quick; }
                 for i in $(seq 1 "$RUNS"); do
                     echo "== run $i/$RUNS"
-                    $RUNNER ./build/bench    > "results/bench.$i.txt"
-                    $RUNNER ./build/bench_qf > "results/bench_qf.$i.txt"
+                    for p in $PROGS; do
+                        if [ -n "$BASE" ] && [ -x "base/build/$p" ]; then
+                            (cd base && $RUNNER "./build/$p" $(args $p)) > "results/base.$p.$i.txt"
+                        fi
+                        $RUNNER "./build/$p" $(args $p) > "results/head.$p.$i.txt"
+                    done
+                    cp "results/head.bench.$i.txt" "gmp/bench.$i.txt"
+                    cp "results/head.bench_qf.$i.txt" "gmp/bench_qf.$i.txt"
                 done
 
             - name: Summary
               run: |
-                python3 tools/bench_summary.py results \
-                    --title "PocketBignum benchmarks (${{ matrix.name }})" \
+                if [ -n "$BASE" ]; then
+                    python3 tools/bench_compare.py results \
+                        --title "PocketBignum: ${GITHUB_SHA::9} vs base ${BASE::9} (${{ matrix.name }})" \
+                        --info "cpu: $CPU" \
+                        --info "compiler: $CCVER" \
+                        | tee -a "$GITHUB_STEP_SUMMARY"
+                fi
+                python3 tools/bench_summary.py gmp \
+                    --title "PocketBignum vs GMP / MPFR (${{ matrix.name }})" \
                     --info "cpu: $CPU" \
                     --info "compiler: $CCVER" \
                     --info "commit: ${GITHUB_SHA::9}" \
