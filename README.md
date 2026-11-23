@@ -20,16 +20,6 @@ struct layouts and field names (`__mpz_struct`, `__mpq_struct`, `__mpfr_struct`)
 
 Options: `PBN_STATIC`, `PBN_LIMB_BITS=32|64`, `PBN_PORTABLE` (no intrinsics / `__int128`), `PBN_ABORT(msg)`.
 
-## Arturo integration (not applied, Arturo untouched)
-
-`tools/check_arturo_surface.sh [arturo-dir]` (or `make arturo-check`) extracts all
-118 GMP/MPFR identifiers used by `src/helpers/bignums.nim` + `src/vm/env.nim` and
-compiles a program referencing each through the compat headers.
-
-Switching Arturo over would mean, in `src/extras/gmp.nim`, replacing
-`{.passL: "-lmpfr -lgmp".}` with `{.compile: "<path>/pocketbignum.c".}` and
-`{.passC: "-I<path>/compat".}`. Nothing else in the wrappers needs to change.
-
 ## Scope
 
 | Layer | Functions |
