@@ -44,6 +44,7 @@ make testthresholds        # fuzz with tiny thresholds: Karatsuba, Toom-3 & divi
                            # radix conversion on almost every operation
 make bench                 # timings vs GMP / MPFR
 make bench-ruby            # timings vs Ruby's Integer (needs ruby)
+make bench-small           # small numbers (1-3 limbs), the way Arturo uses them
 ```
 
 Fuzzers run under ASan + UBSan and compare every result, ternary value and aliasing
