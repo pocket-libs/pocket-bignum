@@ -1,0 +1,91 @@
+name: Benchmarks
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - 'pocketbignum.h'
+            - 'tests/bench*.c'
+            - 'tools/bench_summary.py'
+            - 'Makefile'
+            - '.github/workflows/bench.yml'
+    workflow_dispatch:
+        inputs:
+            runs:
+                description: 'Runs per benchmark (medians are reported)'
+                default: '5'
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    # Micro-benchmarks vs GMP / MPFR (same process, same inputs, see tests/bench*.c),
+    # repeated several times (alternating the two programs) to filter out runner noise;
+    # medians + ratio spread end up in the job summary
+    bench:
+        name: bench (${{ matrix.name }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { name: linux-amd64, os: ubuntu-latest    }
+                    - { name: linux-arm64, os: ubuntu-24.04-arm }
+                    - { name: macos-arm64, os: macos-latest     }
+                    - { name: macos-amd64, os: macos-15-intel   }
+        env:
+            RUNS: ${{ github.event.inputs.runs || '5' }}
+        steps:
+            - uses: actions/checkout@v6
+
+            - name: Install GMP & MPFR (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y libgmp-dev libmpfr-dev
+                echo "GMP_PREFIX=/usr" >> "$GITHUB_ENV"
+                echo "CPU=$(lscpu | sed -n 's/^Model name: *//p' | head -1) ($(nproc) cores)" >> "$GITHUB_ENV"
+                # pinned to one core, at the highest priority
+                echo "RUNNER=sudo nice -n -20 taskset -c 1" >> "$GITHUB_ENV"
+
+            - name: Install GMP & MPFR (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                brew install gmp mpfr
+                echo "GMP_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
+                echo "CPU=$(sysctl -n machdep.cpu.brand_string) ($(sysctl -n hw.ncpu) cores)" >> "$GITHUB_ENV"
+                echo "RUNNER=" >> "$GITHUB_ENV"
+
+            - name: Build
+              run: |
+                make build/bench build/bench_qf GMP="$GMP_PREFIX"
+                echo "CCVER=$(cc --version | head -1)" >> "$GITHUB_ENV"
+
+            - name: Warm up
+              run: |
+                $RUNNER ./build/bench quick > /dev/null
+                $RUNNER ./build/bench_qf > /dev/null
+
+            - name: Run
+              run: |
+                mkdir -p results
+                for i in $(seq 1 "$RUNS"); do
+                    echo "== run $i/$RUNS"
+                    $RUNNER ./build/bench    > "results/bench.$i.txt"
+                    $RUNNER ./build/bench_qf > "results/bench_qf.$i.txt"
+                done
+
+            - name: Summary
+              run: |
+                python3 tools/bench_summary.py results \
+                    --title "PocketBignum benchmarks (${{ matrix.name }})" \
+                    --info "cpu: $CPU" \
+                    --info "compiler: $CCVER" \
+                    --info "commit: ${GITHUB_SHA::9}" \
+                    | tee -a "$GITHUB_STEP_SUMMARY"
+
+            - uses: actions/upload-artifact@v6
+              with:
+                name: bench-${{ matrix.name }}
+                path: results/
