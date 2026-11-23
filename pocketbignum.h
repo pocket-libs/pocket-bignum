@@ -2149,9 +2149,63 @@ static void pbz_addsub(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int bneg) {
 
 PBN_DEF void pbz_add(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_addsub(r, a, b, 0); }
 PBN_DEF void pbz_sub(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_addsub(r, a, b, 1); }
-PBN_DEF void pbz_add_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 0); }
-PBN_DEF void pbz_sub_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 1); }
-PBN_DEF void pbz_ui_sub(pbz_ptr r, unsigned long a, pbz_srcptr b) { PBZ_TMP_UL(t, a); pbz_addsub(r, t, b, 1); }
+/* r = a + b (bneg: a - b) for a single limb b */
+static void pbz_add_limb(pbz_ptr r, pbz_srcptr a, pbn_limb b, int bneg) {
+    pbn_size as = SIZ(a), an = PBN_ABS(as), rn;
+    pbn_limb *rp;
+    if (an == 0) {
+        if (b == 0) { SIZ(r) = 0; return; }
+        rp = PBZ_GROW(r, 1);
+        rp[0] = b;
+        SIZ(r) = bneg ? -1 : 1;
+        return;
+    }
+    if ((as < 0) == bneg) {
+        /* same signs: |r| = |a| + b */
+        rp = PBZ_GROW(r, an + 1);
+        rp[an] = pbn_n_add_1(rp, PTR(a), an, b);
+        rn = an + (rp[an] != 0);
+        SIZ(r) = (int)(as < 0 ? -rn : rn);
+    } else if (an == 1 && PTR(a)[0] < b) {
+        /* |a| < b: the sign flips */
+        pbn_limb v = b - PTR(a)[0];
+        rp = PBZ_GROW(r, 1);
+        rp[0] = v;
+        SIZ(r) = as < 0 ? 1 : -1;
+    } else {
+        rp = PBZ_GROW(r, an);
+        pbn_n_sub_1(rp, PTR(a), an, b);
+        rn = an;
+        PBN_NORM(rp, rn);
+        SIZ(r) = (int)(as < 0 ? -rn : rn);
+    }
+}
+
+/* r = a * b for a single limb b (neg: the product's sign flips) */
+static void pbz_mul_limb(pbz_ptr r, pbz_srcptr a, pbn_limb b, int neg) {
+    pbn_size as = SIZ(a), an = PBN_ABS(as), rn;
+    pbn_limb *rp;
+    if (an == 0 || b == 0) { SIZ(r) = 0; return; }
+    rp = PBZ_GROW(r, an + 1);
+    rp[an] = pbn_n_mul_1(rp, PTR(a), an, b);
+    rn = an + (rp[an] != 0);
+    SIZ(r) = (int)(((as < 0) != neg) ? -rn : rn);
+}
+
+#define PBN_UL_FITS_LIMB(u) ((unsigned long)(pbn_limb)(u) == (u))
+
+PBN_DEF void pbz_add_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_add_limb(r, a, (pbn_limb)b, 0); return; }
+    { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 0); }
+}
+PBN_DEF void pbz_sub_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_add_limb(r, a, (pbn_limb)b, 1); return; }
+    { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 1); }
+}
+PBN_DEF void pbz_ui_sub(pbz_ptr r, unsigned long a, pbz_srcptr b) {
+    if (PBN_UL_FITS_LIMB(a)) { pbz_add_limb(r, b, (pbn_limb)a, 1); SIZ(r) = -SIZ(r); return; }
+    { PBZ_TMP_UL(t, a); pbz_addsub(r, t, b, 1); }
+}
 
 PBN_DEF void pbz_neg(pbz_ptr r, pbz_srcptr a) { pbz_set(r, a); SIZ(r) = -SIZ(r); }
 PBN_DEF void pbz_abs(pbz_ptr r, pbz_srcptr a) { pbz_set(r, a); SIZ(r) = PBN_ABS(SIZ(r)); }
@@ -2199,14 +2253,27 @@ PBN_DEF void pbz_mul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
     SIZ(r) = (int)(neg ? -rn : rn);
 }
 
-PBN_DEF void pbz_mul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_mul(r, a, t); }
-PBN_DEF void pbz_mul_si(pbz_ptr r, pbz_srcptr a, long b)          { PBZ_TMP_SL(t, b); pbz_mul(r, a, t); }
+PBN_DEF void pbz_mul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_mul_limb(r, a, (pbn_limb)b, 0); return; }
+    { PBZ_TMP_UL(t, b); pbz_mul(r, a, t); }
+}
+PBN_DEF void pbz_mul_si(pbz_ptr r, pbz_srcptr a, long b) {
+    unsigned long m = b < 0 ? 0UL - (unsigned long)b : (unsigned long)b;
+    if (PBN_UL_FITS_LIMB(m)) { pbz_mul_limb(r, a, (pbn_limb)m, b < 0); return; }
+    { PBZ_TMP_SL(t, b); pbz_mul(r, a, t); }
+}
 
 PBN_DEF void pbz_addmul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
-    pbz_t t; pbz_init(t); pbz_mul(t, a, b); pbz_add(r, r, t); pbz_clear(t);
+    PBZ_STACK(t, 16);
+    pbz_mul(t, a, b);
+    pbz_add(r, r, t);
+    pbz_clear(t);
 }
 PBN_DEF void pbz_submul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
-    pbz_t t; pbz_init(t); pbz_mul(t, a, b); pbz_sub(r, r, t); pbz_clear(t);
+    PBZ_STACK(t, 16);
+    pbz_mul(t, a, b);
+    pbz_sub(r, r, t);
+    pbz_clear(t);
 }
 PBN_DEF void pbz_addmul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addmul(r, a, t); }
 PBN_DEF void pbz_submul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_submul(r, a, t); }
