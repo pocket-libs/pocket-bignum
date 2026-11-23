@@ -2648,19 +2648,84 @@ PBN_DEF void pbz_combit(pbz_ptr a, pbn_bitcnt k) { pbz_addbit(a, k, pbz_tstbit(a
 /* ---- powers ---- */
 
 PBN_DEF void pbz_pow_ui(pbz_ptr r, pbz_srcptr b, unsigned long e) {
-    pbz_t base;
-    int i;
+    pbn_size bs = SIZ(b), bn = PBN_ABS(bs), zl = 0, on, pn, tn, cap, total, rn, sl;
+    pbn_bitcnt tz, ob, shift;
+    pbn_limb *buf, *op, *p, *t, *rp;
+    unsigned sb;
+    int neg = bs < 0 && (e & 1), i;
+    PBN_TMP_DECL(pb);
+
     if (e == 0) { pbz_set_ui(r, 1); return; }
-    if (SIZ(b) == 0) { SIZ(r) = 0; return; }
-    pbz_init_set(base, b);
-    pbz_set(r, base);
-    for (i = (int)(sizeof(unsigned long) * CHAR_BIT) - 1; i >= 0; i--)
-        if ((e >> i) & 1) break;
-    for (i--; i >= 0; i--) {
-        pbz_mul(r, r, r);
-        if ((e >> i) & 1) pbz_mul(r, r, base);
+    if (bn == 0) { SIZ(r) = 0; return; }
+
+    /* b = o * 2^tz with o odd: b^e = o^e * 2^(tz e) */
+    while (PTR(b)[zl] == 0) zl++;
+    tz = (pbn_bitcnt)zl * PBN_B + (pbn_bitcnt)pbn_ctz(PTR(b)[zl]);
+    on = bn - zl;
+#define PBN_BITCNT_HALF ((pbn_bitcnt)~(pbn_bitcnt)0 >> (sizeof(pbn_bitcnt) * CHAR_BIT / 2))
+    /* overflow checks: a division only when the operands aren't small */
+    if ((tz | (pbn_bitcnt)e) > PBN_BITCNT_HALF && tz && e > (~(pbn_bitcnt)0) / tz) PBN_ABORT("number too large");
+    shift = tz * (pbn_bitcnt)e;
+
+    /* o^e has at most ob * e bits */
+    {
+        pbn_limb top = PTR(b)[bn - 1];
+        ob = (pbn_bitcnt)(bn - 1) * PBN_B + (pbn_bitcnt)(PBN_B - pbn_clz(top)) - tz;
     }
-    pbz_clear(base);
+    if ((ob | (pbn_bitcnt)e) > PBN_BITCNT_HALF / 4 && e > (~(pbn_bitcnt)0 - 2 * PBN_B) / ob) PBN_ABORT("number too large");
+    cap = (pbn_size)(ob * (pbn_bitcnt)e / PBN_B) + 2;
+    total = on + 2 * cap;
+    buf = PBN_TMP_GET(pb, total);
+    op = buf;
+    p = op + on;
+    t = p + cap;
+
+    if (tz % PBN_B) pbn_n_rshift(op, PTR(b) + zl, on, (unsigned)(tz % PBN_B));
+    else            pbn_n_copy(op, PTR(b) + zl, on);
+    PBN_NORM(op, on);
+
+    /* o^e, left to right */
+    pbn_n_copy(p, op, on);
+    pn = on;
+    if (!(on == 1 && op[0] == 1)) {
+        for (i = 0; (e >> i) > 1; i++) ;          /* i = index of the top bit */
+        for (i--; i >= 0; i--) {
+            pbn_limb *x;
+            if (pn == 1) {
+                pbn_limb hi;
+                p[0] = pbn_umul(p[0], p[0], &hi);
+                if (hi) p[pn++] = hi;
+            } else {
+                pbn_n_sqr(t, p, pn);
+                tn = 2 * pn;
+                PBN_NORM(t, tn);
+                x = p; p = t; t = x; pn = tn;
+            }
+            if ((e >> i) & 1) {
+                if (on == 1) {
+                    pbn_limb cy = pbn_n_mul_1(p, p, pn, op[0]);
+                    if (cy) p[pn++] = cy;
+                } else {
+                    pbn_n_mul(t, p, pn, op, on);
+                    tn = pn + on;
+                    PBN_NORM(t, tn);
+                    x = p; p = t; t = x; pn = tn;
+                }
+            }
+        }
+    }
+
+    /* r = o^e * 2^(tz e) */
+    sl = (pbn_size)(shift / PBN_B);
+    sb = (unsigned)(shift % PBN_B);
+    rn = pn + sl + 1;
+    rp = PBZ_GROW(r, rn);
+    if (sb) rp[pn + sl] = pbn_n_lshift(rp + sl, p, pn, sb);
+    else { pbn_n_copy(rp + sl, p, pn); rp[pn + sl] = 0; }
+    pbn_n_zero(rp, sl);
+    PBN_NORM(rp, rn);
+    SIZ(r) = (int)(neg ? -rn : rn);
+    PBN_TMP_PUT(pb, buf, total);
 }
 
 PBN_DEF void pbz_ui_pow_ui(pbz_ptr r, unsigned long b, unsigned long e) {
