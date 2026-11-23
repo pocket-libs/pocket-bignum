@@ -719,7 +719,10 @@ static pbn_limb pbn_n_add_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_li
         pbn_limb s = ap[i] + b;
         b = s < b;
         rp[i] = s;
-        if (!b) { pbn_n_copy(rp + i + 1, ap + i + 1, n - i - 1); return 0; }
+        if (!b) {
+            if (rp != ap) for (i++; i < n; i++) rp[i] = ap[i];
+            return 0;
+        }
     }
     return b;
 }
@@ -730,7 +733,10 @@ static pbn_limb pbn_n_sub_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_li
         pbn_limb a = ap[i];
         rp[i] = a - b;
         b = a < b;
-        if (!b) { pbn_n_copy(rp + i + 1, ap + i + 1, n - i - 1); return 0; }
+        if (!b) {
+            if (rp != ap) for (i++; i < n; i++) rp[i] = ap[i];
+            return 0;
+        }
     }
     return b;
 }
