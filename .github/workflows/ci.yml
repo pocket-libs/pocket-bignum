@@ -1,0 +1,143 @@
+name: CI
+
+on:
+    push:
+    pull_request:
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    ITERS: 20000
+
+jobs:
+    # Differential fuzzers vs GMP / MPFR (ASan + UBSan),
+    # with 64-bit limbs, 32-bit limbs & pure C99 (PBN_PORTABLE),
+    # plus the compat-header smoke test
+    unix:
+        name: test (${{ matrix.name }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { name: linux-amd64-gcc,   os: ubuntu-latest,    cc: gcc   }
+                    - { name: linux-amd64-clang, os: ubuntu-latest,    cc: clang }
+                    - { name: linux-arm64-gcc,   os: ubuntu-24.04-arm, cc: gcc   }
+                    - { name: macos-arm64,       os: macos-latest,     cc: clang }
+                    - { name: macos-amd64,       os: macos-15-intel,   cc: clang }
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install GMP & MPFR (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y libgmp-dev libmpfr-dev
+                # ASan needs fewer random mmap bits than recent kernels use
+                sudo sysctl vm.mmap_rnd_bits=28
+                echo "GMP_PREFIX=/usr" >> "$GITHUB_ENV"
+
+            - name: Install GMP & MPFR (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                brew install gmp mpfr
+                echo "GMP_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
+
+            - name: Test
+              run: make test CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=1
+
+            - name: Test (another seed)
+              run: make test64 test32 testportable testqf CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=${{ github.run_number }}
+
+    # Same tests with MinGW (no sanitizers there)
+    windows-mingw:
+        name: test (windows-amd64-mingw)
+        runs-on: windows-latest
+        defaults:
+            run:
+                shell: msys2 {0}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: msys2/setup-msys2@v2
+              with:
+                msystem: UCRT64
+                update: true
+                install: >-
+                    make
+                    mingw-w64-ucrt-x86_64-gcc
+                    mingw-w64-ucrt-x86_64-gmp
+                    mingw-w64-ucrt-x86_64-mpfr
+
+            - name: Test
+              run: make test CC=gcc GMP=/ucrt64 SAN= ITERS=$ITERS SEED=1
+
+    # MSVC: its own intrinsics paths (_umul128, _BitScan*), and pure C99
+    windows-msvc:
+        name: test (windows-${{ matrix.arch }}-msvc)
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { arch: amd64, os: windows-latest,  vcarch: x64   }
+                    - { arch: arm64, os: windows-11-arm,  vcarch: arm64 }
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: ilammy/msvc-dev-cmd@v1
+              with:
+                arch: ${{ matrix.vcarch }}
+
+            - name: Build library
+              shell: cmd
+              run: |
+                cl /nologo /W3 /O2 /c pocketbignum.c /Fo:pbn.obj || exit /b 1
+                cl /nologo /W3 /O2 /DPBN_PORTABLE /c pocketbignum.c /Fo:pbn_portable.obj || exit /b 1
+
+            - name: Compat smoke test
+              shell: cmd
+              run: |
+                cl /nologo /W3 /O2 /Icompat tests\compat_smoke.c /Fe:compat.exe || exit /b 1
+                compat.exe || exit /b 1
+                cl /nologo /W3 /O2 /DPBN_PORTABLE /Icompat tests\compat_smoke.c /Fe:compat_portable.exe || exit /b 1
+                compat_portable.exe || exit /b 1
+
+    # A real 32-bit target (no __int128, 32-bit pointers)
+    linux-32bit:
+        name: test (linux-i386)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install multilib
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y gcc-multilib
+
+            - name: Compat smoke test
+              run: |
+                mkdir -p build
+                for opt in "" "-DPBN_PORTABLE"; do
+                    gcc -m32 -O2 -std=c99 -Wall -Wextra -Wno-unused-function $opt -Icompat tests/compat_smoke.c -o build/compat32 -lm
+                    ./build/compat32
+                done
+
+    # Every GMP/MPFR identifier Arturo uses must be provided by compat/
+    arturo-surface:
+        name: arturo surface
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Checkout Arturo
+              uses: actions/checkout@v4
+              with:
+                repository: arturo-lang/arturo
+                path: arturo
+
+            - name: Check
+              run: ./tools/check_arturo_surface.sh "$GITHUB_WORKSPACE/arturo"
