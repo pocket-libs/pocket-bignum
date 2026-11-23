@@ -424,6 +424,12 @@ extern "C" {
 #ifndef PBN_SQR_KARA_THRESHOLD
 #  define PBN_SQR_KARA_THRESHOLD 40
 #endif
+#ifndef PBN_MUL_TOOM3_THRESHOLD
+#  define PBN_MUL_TOOM3_THRESHOLD 100
+#endif
+#ifndef PBN_SQR_TOOM3_THRESHOLD
+#  define PBN_SQR_TOOM3_THRESHOLD 160
+#endif
 #define PBN_KARA_ITCH(n) (4 * (n) + 4 * 64)
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -1010,34 +1016,211 @@ static void pbn_n_kara_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_lim
     if (cy && 2 * n > 3 * l) pbn_n_add_1(rp + 3 * l, rp + 3 * l, 2 * n - 3 * l, cy);
 }
 
+/* ---- Toom-3 (evaluation at 0, 1, -1, 2, oo) ----
+   a = a0 + a1 x + a2 x^2, b likewise (x = B^k); with r(t) = a(t) b(t) and the product
+   c0 + c1 x + c2 x^2 + c3 x^3 + c4 x^4 (all c_i >= 0), interpolation keeps every
+   intermediate non-negative:
+       S = (r(1) + r(-1)) / 2         = c0 + c2 + c4    ->  c2 = S - c0 - c4
+       D = (r(1) - r(-1)) / 2         = c1 + c3
+       T = (r(2) - c0 - 4c2 - 16c4)/2 = c1 + 4c3        ->  c3 = (T - D) / 3,  c1 = D - c3  */
+
+static void pbn_n_mul_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb *tp);
+static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp);
+
+#define PBN_TOOM3_MIN 5     /* smallest size Toom-3 can split (k = ceil(n/3), n - 2k >= 1) */
+
+static pbn_size pbn_mul_itch(pbn_size n) {
+    pbn_size k, a, b;
+    if (n < PBN_MUL_KARA_THRESHOLD) return 0;
+    if (n < PBN_MUL_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN) return PBN_KARA_ITCH(n);
+    k = (n + 2) / 3;
+    a = pbn_mul_itch(k);
+    b = pbn_mul_itch(k + 1);
+    return 16 * (k + 1) + PBN_MAX(a, b);
+}
+
+static pbn_size pbn_sqr_itch(pbn_size n) {
+    pbn_size k, a, b;
+    if (n < PBN_SQR_KARA_THRESHOLD) return 0;
+    if (n < PBN_SQR_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN) return PBN_KARA_ITCH(n);
+    k = (n + 2) / 3;
+    a = pbn_sqr_itch(k);
+    b = pbn_sqr_itch(k + 1);
+    return 16 * (k + 1) + PBN_MAX(a, b);
+}
+
+/* rp = ap / 3 for an exact multiple of 3, by multiplying with the inverse of 3 mod B
+   (Jebelean's exact division): one multiplication per limb, no division */
+static void pbn_n_divexact_by3(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
+    const pbn_limb inv3 = PBN_LIMB_MAX / 3 * 2 + 1;     /* 3 * inv3 == 1 (mod B) */
+    pbn_limb c = 0, hi;
+    pbn_size i;
+    for (i = 0; i < n; i++) {
+        pbn_limb a = ap[i], s = a - c, q;
+        pbn_limb b = a < c;
+        q = s * inv3;
+        rp[i] = q;
+        pbn_umul(q, 3, &hi);
+        c = hi + b;
+    }
+}
+
+/* rp[0..rn) += {cp, cn} * B^off (the sum must fit) */
+static void pbn_add_at(pbn_limb *rp, pbn_size rn, pbn_size off, const pbn_limb *cp, pbn_size cn) {
+    pbn_limb cy;
+    PBN_NORM(cp, cn);
+    if (cn == 0) return;
+    cy = pbn_n_add_n(rp + off, rp + off, cp, cn);
+    if (cy) pbn_n_add_1(rp + off + cn, rp + off + cn, rn - off - cn, cy);
+}
+
+/* v1 = a0 + a1 + a2, vm = |a0 - a1 + a2| (returns 1 if negative), v2 = a0 + 2 a1 + 4 a2;
+   each k+1 limbs; a2 has r limbs */
+static int pbn_toom3_eval(pbn_limb *v1, pbn_limb *vm, pbn_limb *v2, const pbn_limb *ap, pbn_size k, pbn_size r) {
+    const pbn_limb *a0 = ap, *a1 = ap + k, *a2 = ap + 2 * k;
+    int neg;
+    /* vm = a0 + a2 */
+    vm[k] = pbn_n_add(vm, a0, k, a2, r);
+    /* v1 = vm + a1 */
+    v1[k] = vm[k] + pbn_n_add_n(v1, vm, a1, k);
+    /* vm = |vm - a1| */
+    neg = pbn_absdiff(vm, vm, k + 1, a1, k);
+    /* v2 = ((a2 * 2) + a1) * 2 + a0 */
+    pbn_n_zero(v2, k + 1);
+    pbn_n_copy(v2, a2, r);
+    pbn_n_lshift(v2, v2, k + 1, 1);
+    v2[k] += pbn_n_add_n(v2, v2, a1, k);
+    pbn_n_lshift(v2, v2, k + 1, 1);
+    v2[k] += pbn_n_add_n(v2, v2, a0, k);
+    return neg;
+}
+
+/* r1 = r(1), rm = |r(-1)| (with sign neg), r2 = r(2), each w = 2k+2 limbs; c0 at rp[0..2k),
+   c4 at rp[4k..4k+2r). Leaves the full product in rp[0..4k+2r). Destroys r1, rm, r2;
+   t: w limbs of scratch */
+static void pbn_toom3_interpolate(pbn_limb *rp, pbn_size k, pbn_size r, pbn_limb *r1, pbn_limb *rm, int neg,
+                                  pbn_limb *r2, pbn_limb *t) {
+    pbn_size w = 2 * k + 2, rn = 4 * k + 2 * r;
+    pbn_limb bw;
+
+    /* t = 2D, rm = 2S */
+    if (!neg) {
+        pbn_n_sub_n(t, r1, rm, w);
+        pbn_n_add_n(rm, r1, rm, w);
+    } else {
+        pbn_n_add_n(t, r1, rm, w);
+        pbn_n_sub_n(rm, r1, rm, w);
+    }
+    pbn_n_rshift(t, t, w, 1);          /* t  = D = c1 + c3 */
+    pbn_n_rshift(rm, rm, w, 1);        /* rm = S = c0 + c2 + c4 */
+
+    /* rm = c2 */
+    pbn_n_sub(rm, rm, w, rp, 2 * k);
+    pbn_n_sub(rm, rm, w, rp + 4 * k, 2 * r);
+
+    /* r2 = (r(2) - c0 - 4 c2 - 16 c4) / 2 = c1 + 4 c3 */
+    pbn_n_sub(r2, r2, w, rp, 2 * k);
+    pbn_n_submul_1(r2, rm, w, 4);
+    bw = pbn_n_submul_1(r2, rp + 4 * k, 2 * r, 16);
+    if (2 * r < w) pbn_n_sub_1(r2 + 2 * r, r2 + 2 * r, w - 2 * r, bw);
+    pbn_n_rshift(r2, r2, w, 1);
+
+    /* r2 = c3 = (r2 - D) / 3 (exact), t = c1 = D - c3 */
+    pbn_n_sub_n(r2, r2, t, w);
+    pbn_n_divexact_by3(r2, r2, w);
+    pbn_n_sub_n(t, t, r2, w);
+
+    /* assemble: c0 | c4 already in place */
+    pbn_n_zero(rp + 2 * k, 2 * k);
+    pbn_add_at(rp, rn, k, t, w);
+    pbn_add_at(rp, rn, 2 * k, rm, w);
+    pbn_add_at(rp, rn, 3 * k, r2, w);
+}
+
+static void pbn_n_toom3_mul(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb *tp) {
+    pbn_size k = (n + 2) / 3, r = n - 2 * k, w = 2 * k + 2;
+    pbn_limb *a1 = tp, *am = a1 + (k + 1), *a2 = am + (k + 1);
+    pbn_limb *b1 = a2 + (k + 1), *bm = b1 + (k + 1), *b2 = bm + (k + 1);
+    pbn_limb *r1 = b2 + (k + 1), *rm = r1 + w, *r2 = rm + w, *t = r2 + w, *ws = t + w;
+    int neg;
+
+    neg  = pbn_toom3_eval(a1, am, a2, ap, k, r);
+    neg ^= pbn_toom3_eval(b1, bm, b2, bp, k, r);
+
+    pbn_n_mul_n(r1, a1, b1, k + 1, ws);
+    pbn_n_mul_n(rm, am, bm, k + 1, ws);
+    pbn_n_mul_n(r2, a2, b2, k + 1, ws);
+    pbn_n_mul_n(rp, ap, bp, k, ws);                              /* c0 */
+    pbn_n_mul_n(rp + 4 * k, ap + 2 * k, bp + 2 * k, r, ws);      /* c4 */
+
+    pbn_toom3_interpolate(rp, k, r, r1, rm, neg, r2, t);
+}
+
+static void pbn_n_toom3_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
+    pbn_size k = (n + 2) / 3, r = n - 2 * k, w = 2 * k + 2;
+    pbn_limb *a1 = tp, *am = a1 + (k + 1), *a2 = am + (k + 1);
+    pbn_limb *r1 = a2 + (k + 1), *rm = r1 + w, *r2 = rm + w, *t = r2 + w, *ws = t + w;
+
+    pbn_toom3_eval(a1, am, a2, ap, k, r);
+
+    pbn_n_sqr_n(r1, a1, k + 1, ws);
+    pbn_n_sqr_n(rm, am, k + 1, ws);
+    pbn_n_sqr_n(r2, a2, k + 1, ws);
+    pbn_n_sqr_n(rp, ap, k, ws);                                  /* c0 */
+    pbn_n_sqr_n(rp + 4 * k, ap + 2 * k, r, ws);                  /* c4 */
+
+    pbn_toom3_interpolate(rp, k, r, r1, rm, 0, r2, t);
+}
+
+/* rp[0..2n) = a * b (n limbs each); tp: pbn_mul_itch(n) limbs */
+static void pbn_n_mul_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb *tp) {
+    if (n < PBN_MUL_KARA_THRESHOLD)
+        pbn_n_mul_basecase(rp, ap, n, bp, n);
+    else if (n < PBN_MUL_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN)
+        pbn_n_kara_mul(rp, ap, bp, n, tp);
+    else
+        pbn_n_toom3_mul(rp, ap, bp, n, tp);
+}
+
+/* rp[0..2n) = a^2; tp: pbn_sqr_itch(n) limbs */
+static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
+    if (n < PBN_SQR_KARA_THRESHOLD)
+        pbn_n_sqr_basecase(rp, ap, n);
+    else if (n < PBN_SQR_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN)
+        pbn_n_kara_sqr(rp, ap, n, tp);
+    else
+        pbn_n_toom3_sqr(rp, ap, n, tp);
+}
+
 static void pbn_n_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
     if (n < PBN_SQR_KARA_THRESHOLD) {
         pbn_n_sqr_basecase(rp, ap, n);
     } else {
-        pbn_size itch = PBN_KARA_ITCH(n);
+        pbn_size itch = pbn_sqr_itch(n);
         pbn_limb *tp = PBN_TMP_ALLOC(itch);
-        pbn_n_kara_sqr(rp, ap, n, tp);
+        pbn_n_sqr_n(rp, ap, n, tp);
         PBN_TMP_FREE(tp, itch);
     }
 }
 
 /* rp[0..an+bn) = a * b; an >= bn >= 1; rp must not overlap inputs */
 static void pbn_n_mul(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn) {
-    pbn_size itch, off;
+    pbn_size itch, off, mi;
     pbn_limb *tp, *pp;
 
     if (bn < PBN_MUL_KARA_THRESHOLD) { pbn_n_mul_basecase(rp, ap, an, bp, bn); return; }
     if (ap == bp && an == bn) { pbn_n_sqr(rp, ap, an); return; }
 
-    itch = PBN_KARA_ITCH(bn) + 2 * bn;
+    mi = pbn_mul_itch(bn);
+    itch = mi + 2 * bn;
     tp = PBN_TMP_ALLOC(itch);
-    pp = tp + PBN_KARA_ITCH(bn);
+    pp = tp + mi;
 
-    pbn_n_kara_mul(rp, ap, bp, bn, tp);
+    pbn_n_mul_n(rp, ap, bp, bn, tp);
     off = bn;
     while (an - off >= bn) {
         pbn_limb cy;
-        pbn_n_kara_mul(pp, ap + off, bp, bn, tp);
+        pbn_n_mul_n(pp, ap + off, bp, bn, tp);
         cy = pbn_n_add_n(rp + off, rp + off, pp, bn);
         pbn_n_add_1(rp + off + bn, pp + bn, bn, cy);
         off += bn;
