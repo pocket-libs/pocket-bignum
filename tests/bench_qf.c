@@ -1,4 +1,5 @@
 /* PocketBignum rationals/floats vs GMP/MPFR.  ratio = pbn time / reference time */
+#define _POSIX_C_SOURCE 200112L   /* clock_gettime & CLOCK_MONOTONIC with -std=c99 (glibc) */
 #define PBN_IMPLEMENTATION
 #include "../pocketbignum.h"
 #include <gmp.h>
