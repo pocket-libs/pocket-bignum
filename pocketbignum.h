@@ -2222,6 +2222,28 @@ PBN_DEF void pbz_mul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
         pbz_srcptr t = a; a = b; b = t;
         rn = an; an = bn; bn = rn;
     }
+#if defined(PBN_HAVE_DLIMB)
+    if (an == 2 && bn == 2) {
+        /* inline 2x2 (operands read first: r may alias a or b) */
+        pbn_limb a0 = PTR(a)[0], a1 = PTR(a)[1], b0 = PTR(b)[0], b1 = PTR(b)[1], r1, r2, h;
+        pbn_dlimb t;
+        rp = PBZ_GROW(r, 4);
+        t = (pbn_dlimb)a0 * b0;
+        rp[0] = (pbn_limb)t;
+        t = (pbn_dlimb)a0 * b1 + (pbn_limb)(t >> PBN_B);
+        r1 = (pbn_limb)t;
+        r2 = (pbn_limb)(t >> PBN_B);
+        t = (pbn_dlimb)a1 * b0 + r1;
+        rp[1] = (pbn_limb)t;
+        h = (pbn_limb)(t >> PBN_B);
+        t = (pbn_dlimb)a1 * b1 + r2 + h;
+        rp[2] = (pbn_limb)t;
+        rp[3] = (pbn_limb)(t >> PBN_B);
+        rn = 4 - (rp[3] == 0);
+        SIZ(r) = (int)(neg ? -rn : rn);
+        return;
+    }
+#endif
     if (bn == 1) {
         pbn_limb b0 = PTR(b)[0], cy;
         rp = PBZ_GROW(r, an + 1);
