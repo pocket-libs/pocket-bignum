@@ -1811,6 +1811,10 @@ PBN_DEF size_t pbz_sizeinbase(pbz_srcptr x, int base) {
 }
 
 static const char pbn_digits_lower[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+static const char pbn_digit_pairs[] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
 static const char pbn_digits_upper[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static const char pbn_digits_62[]    = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -1879,7 +1883,13 @@ static void pbn_get_str_rec(char *out, size_t nd, pbn_limb *np, pbn_size nn, con
             pbn_limb r = pbn_n_divrem_1(np, np, nn, bb);
             PBN_NORM(np, nn);
             if (base == 10) {
-                for (j = 0; j < k && pos > 0; j++) { out[--pos] = (char)('0' + r % 10); r /= 10; }
+                for (j = 0; j + 2 <= k && pos >= 2; j += 2) {
+                    unsigned d2 = (unsigned)(r % 100) * 2;
+                    r /= 100;
+                    out[--pos] = pbn_digit_pairs[d2 + 1];
+                    out[--pos] = pbn_digit_pairs[d2];
+                }
+                for (; j < k && pos > 0; j++) { out[--pos] = (char)('0' + r % 10); r /= 10; }
             } else {
                 for (j = 0; j < k && pos > 0; j++) { out[--pos] = digs[r % (pbn_limb)base]; r /= (pbn_limb)base; }
             }
@@ -1993,6 +2003,29 @@ PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
 
     if (n == 0) {
         s[len++] = '0';
+    } else if (base == 10 && n <= 3) {
+        /* small numbers: chunks of k digits, written backwards into a local buffer */
+        char tmp[3 * 20 + 4];
+        pbn_limb t3[3];
+        pbn_size tn = n;
+        int k, j;
+        pbn_limb bb = pbn_big_base(10, &k);
+        size_t pos = sizeof tmp;
+        pbn_n_copy(t3, PTR(x), n);
+        while (tn > 0) {
+            pbn_limb r = tn == 1 ? t3[0] % bb : pbn_n_divrem_1(t3, t3, tn, bb);
+            if (tn == 1) t3[0] /= bb;
+            PBN_NORM(t3, tn);
+            for (j = 0; j + 2 <= k && (tn > 0 || r >= 10); j += 2) {
+                unsigned d2 = (unsigned)(r % 100) * 2;
+                r /= 100;
+                tmp[--pos] = pbn_digit_pairs[d2 + 1];
+                tmp[--pos] = pbn_digit_pairs[d2];
+            }
+            for (; j < k && (tn > 0 || r > 0); j++) { tmp[--pos] = (char)('0' + r % 10); r /= 10; }
+        }
+        memcpy(s + len, tmp + pos, sizeof tmp - pos);
+        len += sizeof tmp - pos;
     } else if (n == 1 && base == 10) {
         pbn_limb v = PTR(x)[0];
         size_t a = len, b2;
@@ -2042,7 +2075,7 @@ static int pbn_digit_value(int c, int base) {
 
 PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
     const unsigned char *p = (const unsigned char *)str;
-    unsigned char *dv;
+    unsigned char *dv, dvbuf[256];
     size_t nd = 0, cap, i;
     int c, neg = 0;
     pbn_size rn, an;
@@ -2067,11 +2100,11 @@ PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
     if (c == 0) { SIZ(x) = 0; return 0; }
 
     cap = strlen((const char *)p - 1);
-    dv = (unsigned char *)pbn_alloc_fn(cap + 1);
+    dv = cap + 1 <= sizeof dvbuf ? dvbuf : (unsigned char *)pbn_alloc_fn(cap + 1);
     for (i = 0; i < cap; i++) {
         if (!pbn_isspace(c)) {
             int d = pbn_digit_value(c, base);
-            if (d >= base) { pbn_free_fn(dv, cap + 1); return -1; }
+            if (d >= base) { if (dv != dvbuf) pbn_free_fn(dv, cap + 1); return -1; }
             dv[nd++] = (unsigned char)d;
         }
         c = *p++;
@@ -2103,7 +2136,7 @@ PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
             pbn_powtab_clear(&t);
         }
     }
-    pbn_free_fn(dv, cap + 1);
+    if (dv != dvbuf) pbn_free_fn(dv, cap + 1);
     PBN_NORM(rp, an);
     SIZ(x) = (int)(neg ? -an : an);
     return 0;
