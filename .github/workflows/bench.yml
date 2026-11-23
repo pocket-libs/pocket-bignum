@@ -88,11 +88,24 @@ jobs:
 
             - name: Build
               run: |
+                # every benchmark of this commit, compiled once against its own header and once
+                # against the base's (same benchmark code on both sides; a benchmark that
+                # doesn't compile against the base is head-only)
+                mkdir -p build
+                [ -n "$BASE" ] && mkdir -p base/build base/tests
+                CFL="-O3 -std=c99 -DNDEBUG -I$GMP_PREFIX/include"
                 PROGS=""
-                for p in bench bench_qf bench_ops bench_small; do
-                    make "build/$p" GMP="$GMP_PREFIX" >/dev/null 2>&1 || continue
+                for src in tests/bench*.c; do
+                    p=$(basename "$src" .c)
+                    case "$p" in
+                        bench)    LIBS="-L$GMP_PREFIX/lib -lgmp -lm" ;;
+                        bench_qf) LIBS="-L$GMP_PREFIX/lib -lmpfr -lgmp -lm" ;;
+                        *)        LIBS="-lm" ;;
+                    esac
+                    cc $CFL "$src" -o "build/$p" $LIBS || { echo "$p: doesn't build"; continue; }
                     if [ -n "$BASE" ]; then
-                        make -C base "build/$p" GMP="$GMP_PREFIX" >/dev/null 2>&1 || { echo "$p: not in the base, head only"; [ "$p" = bench ] || [ "$p" = bench_qf ] || continue; }
+                        cp "$src" "base/tests/$p.c"
+                        (cd base && cc $CFL "tests/$p.c" -o "build/$p" $LIBS) || echo "$p: doesn't build against the base (head only)"
                     fi
                     PROGS="$PROGS $p"
                 done
