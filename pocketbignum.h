@@ -1056,7 +1056,20 @@ static void pbn_n_sqr_basecase(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
     /* off-diagonal products */
     rp[0] = 0;
     rp[n] = pbn_n_mul_1(rp + 1, ap + 1, n - 1, ap[0]);
-    for (i = 1; i < n - 1; i++)
+    i = 1;
+#if defined(PBN_HAVE_ADDMUL_2)
+    /* rows i and i+1 together: both multiply a[i+2..n), at positions 2i+2 and 2i+3;
+       the remaining cross term a[i]*a[i+1] (position 2i+1) is added first */
+    for (; i + 3 <= n; i += 2) {
+        pbn_limb hi, lo, c, ce;
+        lo = pbn_umul(ap[i], ap[i + 1], &hi);
+        rp[2 * i + 1] = pbn_addc(rp[2 * i + 1], lo, 0, &c);
+        ce = pbn_n_add_1(rp + 2 * i + 2, rp + 2 * i + 2, n - i - 2, hi + c);
+        rp[n + i + 1] = pbn_n_addmul_2(rp + 2 * i + 2, ap + i + 2, n - i - 2, ap[i], ap[i + 1]);
+        if (ce && ++rp[n + i] == 0) rp[n + i + 1]++;
+    }
+#endif
+    for (; i < n - 1; i++)
         rp[n + i] = pbn_n_addmul_1(rp + 2 * i + 1, ap + i + 1, n - i - 1, ap[i]);
     rp[2 * n - 1] = pbn_n_lshift(rp + 1, rp + 1, 2 * n - 2, 1);
     /* add diagonal */
