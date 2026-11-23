@@ -10,7 +10,7 @@ SEED    ?= 1
 
 # tiny thresholds: Karatsuba, Toom-3 & divide-and-conquer radix conversion on almost every operation
 SMALLTHR = -DPBN_MUL_KARA_THRESHOLD=2 -DPBN_SQR_KARA_THRESHOLD=2 -DPBN_MUL_TOOM3_THRESHOLD=5 -DPBN_SQR_TOOM3_THRESHOLD=5 \
-           -DPBN_GET_STR_DC_THRESHOLD=2 -DPBN_SET_STR_DC_THRESHOLD=1
+           -DPBN_GET_STR_DC_THRESHOLD=2 -DPBN_SET_STR_DC_THRESHOLD=1 -DPBN_DC_DIV_THRESHOLD=2
 
 BUILD = build
 
