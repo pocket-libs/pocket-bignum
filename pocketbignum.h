@@ -1395,6 +1395,149 @@ static pbn_limb pbn_big_base(int base, int *k) {
     return bb;
 }
 
+/* ---- radix conversion: divide & conquer above a threshold
+        (Brent & Zimmermann, Modern Computer Arithmetic, section 1.7) ---- */
+
+#ifndef PBN_GET_STR_DC_THRESHOLD
+#  define PBN_GET_STR_DC_THRESHOLD 32     /* limbs */
+#endif
+#ifndef PBN_SET_STR_DC_THRESHOLD
+#  define PBN_SET_STR_DC_THRESHOLD 128    /* limbs (worth of digits) */
+#endif
+
+/* powers of the "big base" bb = base^k: pw[i] = bb^(2^i), worth k*2^i digits */
+typedef struct {
+    pbn_limb *p[64];
+    pbn_size  n[64];
+    size_t    digits[64];
+    int       count;
+    pbn_limb  b0;          /* storage for p[0] (no allocation for small numbers) */
+} pbn_powtab;
+
+/* builds pw[0..] while pw[i] has at most maxn limbs */
+static void pbn_powtab_init(pbn_powtab *t, pbn_limb bb, int k, pbn_size maxn) {
+    t->b0 = bb;
+    t->p[0] = &t->b0;
+    t->n[0] = 1;
+    t->digits[0] = (size_t)k;
+    t->count = 1;
+    while (t->count < 64 && 2 * t->n[t->count - 1] <= maxn + 1) {
+        int i = t->count;
+        pbn_size n = 2 * t->n[i - 1];
+        t->p[i] = PBN_TMP_ALLOC(n);
+        pbn_n_sqr(t->p[i], t->p[i - 1], t->n[i - 1]);
+        PBN_NORM(t->p[i], n);
+        t->n[i] = n;
+        t->digits[i] = 2 * t->digits[i - 1];
+        t->count++;
+    }
+}
+
+static void pbn_powtab_clear(pbn_powtab *t) {
+    int i;
+    for (i = 1; i < t->count; i++) PBN_TMP_FREE(t->p[i], 2 * t->n[i - 1]);
+}
+
+/* writes exactly nd digits of {np, nn} (zero-padded; the number must fit) into out;
+   destroys {np, nn} */
+static void pbn_get_str_rec(char *out, size_t nd, pbn_limb *np, pbn_size nn, const pbn_powtab *t,
+                            int base, const char *digs) {
+    PBN_NORM(np, nn);
+    if (nn < PBN_GET_STR_DC_THRESHOLD || t->count < 2) {
+        pbn_limb bb = t->p[0][0];
+        int k = (int)t->digits[0], j;
+        size_t pos = nd;
+        while (nn > 0 && pos > 0) {
+            pbn_limb r = pbn_n_divrem_1(np, np, nn, bb);
+            PBN_NORM(np, nn);
+            if (base == 10) {
+                for (j = 0; j < k && pos > 0; j++) { out[--pos] = (char)('0' + r % 10); r /= 10; }
+            } else {
+                for (j = 0; j < k && pos > 0; j++) { out[--pos] = digs[r % (pbn_limb)base]; r /= (pbn_limb)base; }
+            }
+        }
+        while (pos > 0) out[--pos] = '0';
+        return;
+    }
+    {
+        /* split by the largest table power of at most about half the size */
+        int i = t->count - 1;
+        pbn_size qn, rn;
+        pbn_limb *qp, *rp;
+        while (i > 0 && (2 * t->n[i] > nn + 1 || t->digits[i] >= nd)) i--;
+        rn = t->n[i];
+        if (nn < rn) {
+            pbn_get_str_rec(out + nd - t->digits[i], t->digits[i], np, nn, t, base, digs);
+            memset(out, '0', nd - t->digits[i]);
+            return;
+        }
+        qn = nn - rn + 1;
+        qp = PBN_TMP_ALLOC(qn + rn);
+        rp = qp + qn;
+        pbn_n_tdiv_qr(qp, rp, np, nn, t->p[i], rn);
+        pbn_get_str_rec(out, nd - t->digits[i], qp, qn, t, base, digs);
+        pbn_get_str_rec(out + nd - t->digits[i], t->digits[i], rp, rn, t, base, digs);
+        PBN_TMP_FREE(qp, qn + rn);
+    }
+}
+
+/* {rp, return value} = the number written by the nd digit values dv (most significant
+   first); rp must have room for pbn_set_str_limbs(nd) limbs */
+static pbn_size pbn_set_str_limbs(size_t nd, int base) {
+    return (pbn_size)((double)nd / pbn_log2_over_logb[base] / PBN_B) + 3;
+}
+
+static pbn_size pbn_set_str_rec(pbn_limb *rp, const unsigned char *dv, size_t nd, const pbn_powtab *t, int base) {
+    int k = (int)t->digits[0];
+    if (nd <= (size_t)PBN_SET_STR_DC_THRESHOLD * (size_t)k || t->count < 2) {
+        pbn_limb bb = t->p[0][0];
+        size_t first = nd % (size_t)k, i = 0, j;
+        pbn_size an = 0;
+        if (first == 0) first = (size_t)k;
+        {
+            pbn_limb chunk = 0;
+            for (j = 0; j < first && i < nd; j++) chunk = chunk * (pbn_limb)base + dv[i++];
+            if (chunk) rp[an++] = chunk;
+        }
+        while (i < nd) {
+            pbn_limb chunk = 0, cy;
+            for (j = 0; j < (size_t)k; j++) chunk = chunk * (pbn_limb)base + dv[i++];
+            cy = pbn_n_mul_1(rp, rp, an, bb);
+            cy += pbn_n_add_1(rp, rp, an, chunk);
+            if (cy) rp[an++] = cy;
+        }
+        return an;
+    }
+    {
+        /* n = hi * pw[i] + lo, lo being the last digits[i] digits (about half) */
+        int i = t->count - 1;
+        size_t ld;
+        pbn_size hn, ln, hcap, lcap, rn;
+        pbn_limb *hp, *lp;
+        while (i > 0 && 2 * t->digits[i] > nd) i--;
+        ld = t->digits[i];
+        hcap = pbn_set_str_limbs(nd - ld, base);
+        lcap = pbn_set_str_limbs(ld, base);
+        hp = PBN_TMP_ALLOC(hcap + lcap);
+        lp = hp + hcap;
+        hn = pbn_set_str_rec(hp, dv, nd - ld, t, base);
+        ln = pbn_set_str_rec(lp, dv + nd - ld, ld, t, base);
+        if (hn == 0) {
+            pbn_n_copy(rp, lp, ln);
+            rn = ln;
+        } else {
+            pbn_size pn = t->n[i];
+            if (hn >= pn) pbn_n_mul(rp, hp, hn, t->p[i], pn);
+            else          pbn_n_mul(rp, t->p[i], pn, hp, hn);
+            rn = hn + pn;
+            if (ln) pbn_n_add(rp, rp, rn, lp, ln);
+            PBN_NORM(rp, rn);
+        }
+        PBN_TMP_FREE(hp, hcap + lcap);
+        return rn;
+    }
+}
+
 PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
     const char *digs = pbn_digits_lower;
     pbn_size n = PBN_ABS(SIZ(x));
@@ -1440,28 +1583,20 @@ PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
             s[len++] = digs[v & (((pbn_limb)1 << lg) - 1)];
         }
     } else {
-        int k, j;
+        int k;
         pbn_limb bb = pbn_big_base(base, &k);
+        size_t nd = cap - 2, z = 0;
         pbn_limb *tp = PBN_TMP_ALLOC(n);
-        pbn_size tn = n;
+        pbn_powtab t;
         pbn_n_copy(tp, PTR(x), n);
-        while (tn > 0) {
-            pbn_limb r = pbn_n_divrem_1(tp, tp, tn, bb);
-            PBN_NORM(tp, tn);
-            if (tn > 0 && base == 10) {
-                for (j = 0; j < k; j++) { s[len++] = (char)('0' + r % 10); r /= 10; }
-            } else if (tn > 0) {
-                for (j = 0; j < k; j++) { s[len++] = digs[r % (pbn_limb)base]; r /= (pbn_limb)base; }
-            } else {
-                while (r) { s[len++] = digs[r % (pbn_limb)base]; r /= (pbn_limb)base; }
-            }
-        }
+        pbn_powtab_init(&t, bb, k, n >= PBN_GET_STR_DC_THRESHOLD ? n : 0);
+        pbn_get_str_rec(s + start, nd, tp, n, &t, base, digs);
+        pbn_powtab_clear(&t);
         PBN_TMP_FREE(tp, n);
-        /* reverse */
-        {
-            size_t a = start, b = len - 1;
-            while (a < b) { char c = s[a]; s[a] = s[b]; s[b] = c; a++; b--; }
-        }
+        /* nd may overestimate by one: drop leading zeros */
+        while (z + 1 < nd && s[start + z] == '0') z++;
+        if (z) memmove(s + start, s + start + z, nd - z);
+        len = start + nd - z;
     }
     s[len] = '\0';
     if (!str && len + 1 != cap) s = (char *)pbn_realloc_fn(s, cap, len + 1);
@@ -1532,24 +1667,12 @@ PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
         } else {
             int k;
             pbn_limb bb = pbn_big_base(base, &k);
-            size_t first = nd % (size_t)k, j;
-            if (first == 0) first = (size_t)k;
-            rn = (pbn_size)((double)nd * log((double)base) / log(2.0) / PBN_B) + 2;
+            pbn_powtab t;
+            rn = pbn_set_str_limbs(nd, base);
             rp = PBZ_GROW(x, rn);
-            an = 0;
-            i = 0;
-            {
-                pbn_limb chunk = 0;
-                for (j = 0; j < first; j++) chunk = chunk * (pbn_limb)base + dv[i++];
-                if (chunk) rp[an++] = chunk;
-            }
-            while (i < nd) {
-                pbn_limb chunk = 0, cy;
-                for (j = 0; j < (size_t)k; j++) chunk = chunk * (pbn_limb)base + dv[i++];
-                cy = pbn_n_mul_1(rp, rp, an, bb);
-                cy += pbn_n_add_1(rp, rp, an, chunk);
-                if (cy) rp[an++] = cy;
-            }
+            pbn_powtab_init(&t, bb, k, nd > (size_t)PBN_SET_STR_DC_THRESHOLD * (size_t)k ? rn / 2 + 1 : 0);
+            an = pbn_set_str_rec(rp, dv, nd, &t, base);
+            pbn_powtab_clear(&t);
         }
     }
     pbn_free_fn(dv, cap + 1);
