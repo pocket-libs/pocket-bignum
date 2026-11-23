@@ -5,7 +5,8 @@
  *
  *     bench_ops [quick]        prints:  <op> <limbs> <ns per op>
  *
- * "limbs" is the size of the operand(s) in 64-bit words (for sqrt: of the root).
+ * "limbs" is the size of the operand(s) in 64-bit words (for sqrt: of the root;
+ * for div: of the divisor, the dividend having twice as many).
  */
 #define _POSIX_C_SOURCE 200112L   /* clock_gettime & CLOCK_MONOTONIC with -std=c99 (glibc) */
 #define PBN_IMPLEMENTATION
@@ -71,6 +72,12 @@ int main(int argc, char **argv) {
         long n = sizes[i];
         random_bits(a, 2 * n);
         BENCH("sqrt", n, pbz_sqrt(c, a));
+    }
+    for (i = 0; i < sizeof sizes / sizeof sizes[0] && sizes[i] <= max; i++) {
+        long n = sizes[i];
+        random_bits(a, 2 * n);
+        random_bits(b, n);
+        BENCH("div", n, pbz_tdiv_qr(c, r, a, b));
     }
     for (i = 0; i < sizeof sizes / sizeof sizes[0] && sizes[i] <= max; i++) {
         long n = sizes[i];
