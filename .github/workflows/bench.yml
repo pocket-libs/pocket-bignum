@@ -125,10 +125,10 @@ jobs:
                 for i in $(seq 1 "$RUNS"); do
                     echo "== run $i/$RUNS"
                     for p in $PROGS; do
-                        if [ -n "$BASE" ] && [ -x "base/build/$p" ]; then
-                            (cd base && $RUNNER "./build/$p" $(args $p)) > "results/base.$p.$i.txt"
-                        fi
-                        $RUNNER "./build/$p" $(args $p) > "results/head.$p.$i.txt"
+                        run_base() { if [ -n "$BASE" ] && [ -x "base/build/$p" ]; then (cd base && $RUNNER "./build/$p" $(args $p)) > "results/base.$p.$i.txt"; fi; }
+                        run_head() { $RUNNER "./build/$p" $(args $p) > "results/head.$p.$i.txt"; }
+                        # alternate the order, so neither build always runs first
+                        if [ $((i % 2)) -eq 1 ]; then run_base; run_head; else run_head; run_base; fi
                     done
                     cp "results/head.bench.$i.txt" "gmp/bench.$i.txt"
                     cp "results/head.bench_qf.$i.txt" "gmp/bench_qf.$i.txt"
