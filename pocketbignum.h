@@ -780,11 +780,22 @@ static pbn_limb pbn_n_addmul_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn
 }
 
 static pbn_limb pbn_n_submul_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b) {
-    pbn_limb cy = 0;
-    pbn_size i;
-    for (i = 0; i < n; i++) {
-        pbn_dlimb p = (pbn_dlimb)ap[i] * b + cy;
-        pbn_limb lo = (pbn_limb)p, r = rp[i];
+    pbn_limb cy = 0, lo, r;
+    pbn_dlimb p;
+    pbn_size i = 0;
+    for (; i + 2 <= n; i += 2) {
+        p = (pbn_dlimb)ap[i] * b + cy;
+        lo = (pbn_limb)p; r = rp[i];
+        rp[i] = r - lo;
+        cy = (pbn_limb)(p >> PBN_B) + (r < lo);
+        p = (pbn_dlimb)ap[i + 1] * b + cy;
+        lo = (pbn_limb)p; r = rp[i + 1];
+        rp[i + 1] = r - lo;
+        cy = (pbn_limb)(p >> PBN_B) + (r < lo);
+    }
+    for (; i < n; i++) {
+        p = (pbn_dlimb)ap[i] * b + cy;
+        lo = (pbn_limb)p; r = rp[i];
         rp[i] = r - lo;
         cy = (pbn_limb)(p >> PBN_B) + (r < lo);
     }
