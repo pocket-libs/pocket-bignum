@@ -930,8 +930,25 @@ static pbn_limb pbn_udiv_qrnnd(pbn_limb *r, pbn_limb n1, pbn_limb n0, pbn_limb d
 
 /* v = floor((B^2 - 1) / d) - B, d normalized */
 static pbn_limb pbn_invert_limb(pbn_limb d) {
+#if PBN_B == 64
+    /* Moller & Granlund, Algorithm 2 ("reciprocal_word"): multiplications only, since a
+       128/64 division would go through a slow runtime routine on most compilers */
+    pbn_limb d0 = d & 1, d9 = d >> 55, d40 = (d >> 24) + 1, d63 = (d >> 1) + d0;
+    pbn_limb v0 = (pbn_limb)(((uint32_t)1 << 19) - 3 * ((uint32_t)1 << 8)) / (pbn_limb)(uint32_t)d9;
+    pbn_limb v1 = (v0 << 11) - ((v0 * v0 * d40) >> 40) - 1;
+    pbn_limb v2 = (v1 << 13) + ((v1 * (((pbn_limb)1 << 60) - v1 * d40)) >> 47);
+    pbn_limb e = ((v2 >> 1) & ((pbn_limb)0 - d0)) - v2 * d63;
+    pbn_limb v3, hi, lo;
+    pbn_umul(v2, e, &hi);
+    v3 = (v2 << 31) + (hi >> 1);
+    lo = pbn_umul(v3, d, &hi);
+    lo += d;
+    hi += lo < d;
+    return v3 - hi - d;
+#else
     pbn_limb r;
     return pbn_udiv_qrnnd(&r, ~d, PBN_LIMB_MAX, d);
+#endif
 }
 
 /* (nh, nl) / d with precomputed inverse; nh < d, d normalized */
