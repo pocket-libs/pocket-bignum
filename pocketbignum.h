@@ -802,6 +802,31 @@ static pbn_limb pbn_n_submul_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn
     return cy;
 }
 
+/* rp[0..n] = rp[0..n) + a * (b0 + b1 B); returns the limb above (two rows of the
+   schoolbook product per pass: half the loads & stores of two addmul_1 passes) */
+#define PBN_HAVE_ADDMUL_2 1
+static pbn_limb pbn_n_addmul_2(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b0, pbn_limb b1) {
+    pbn_dlimb t;
+    pbn_limb h0, h1 = 0, prev = ap[0], x;
+    pbn_size k;
+    t = (pbn_dlimb)prev * b0 + rp[0];
+    rp[0] = (pbn_limb)t;
+    h0 = (pbn_limb)(t >> PBN_B);
+    for (k = 1; k < n; k++) {
+        pbn_limb a = ap[k];
+        t = (pbn_dlimb)a * b0 + rp[k] + h0;              /* row b0, position k */
+        x = (pbn_limb)t;
+        h0 = (pbn_limb)(t >> PBN_B);
+        t = (pbn_dlimb)prev * b1 + x + h1;               /* row b1, position k */
+        rp[k] = (pbn_limb)t;
+        h1 = (pbn_limb)(t >> PBN_B);
+        prev = a;
+    }
+    t = (pbn_dlimb)prev * b1 + h0 + h1;
+    rp[n] = (pbn_limb)t;
+    return (pbn_limb)(t >> PBN_B);
+}
+
 #else
 
 static pbn_limb pbn_n_mul_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b) {
@@ -1014,9 +1039,13 @@ static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *n
 /* ---- multiplication ---- */
 
 static void pbn_n_mul_basecase(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn) {
-    pbn_size i;
+    pbn_size i = 1;
     rp[an] = pbn_n_mul_1(rp, ap, an, bp[0]);
-    for (i = 1; i < bn; i++)
+#if defined(PBN_HAVE_ADDMUL_2)
+    for (; i + 2 <= bn; i += 2)
+        rp[an + i + 1] = pbn_n_addmul_2(rp + i, ap, an, bp[i], bp[i + 1]);
+#endif
+    for (; i < bn; i++)
         rp[an + i] = pbn_n_addmul_1(rp + i, ap, an, bp[i]);
 }
 
