@@ -3136,11 +3136,14 @@ static pbn_limb pbn_gcd_limb(pbn_limb a, pbn_limb b) {
     if (!b) return a;
     s = pbn_ctz(a | b);
     a >>= pbn_ctz(a);
-    do {
-        b >>= pbn_ctz(b);
-        if (a > b) { pbn_limb t = a; a = b; b = t; }
-        b -= a;
-    } while (b);
+    b >>= pbn_ctz(b);
+    /* both odd: replace the larger by |a - b| (even, non-zero), shifted; branchless */
+    while (a != b) {
+        pbn_limb t = a - b, m = (pbn_limb)0 - (pbn_limb)(a < b);
+        b += t & m;
+        a = (t ^ m) - m;
+        a >>= pbn_ctz(a);
+    }
     return a << s;
 }
 
@@ -3267,13 +3270,17 @@ PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
         int sh = 0;
         if (an == 2) u |= (pbn_dlimb)PTR(a)[1] << PBN_B;
         if (bn == 2) v |= (pbn_dlimb)PTR(b)[1] << PBN_B;
-        while (!((u | v) & 1)) { u >>= 1; v >>= 1; sh++; }
-        while (!(u & 1)) u >>= 1;
-        do {
-            while (!(v & 1)) v >>= 1;
-            if (u > v) { pbn_dlimb t = u; u = v; v = t; }
-            v -= u;
-        } while (v);
+#define PBN_CTZ_D(x) ((pbn_limb)(x) ? pbn_ctz((pbn_limb)(x)) : PBN_B + pbn_ctz((pbn_limb)((x) >> PBN_B)))
+        {
+            int su = PBN_CTZ_D(u), sv = PBN_CTZ_D(v);
+            sh = su < sv ? su : sv;
+            u >>= su;
+            v >>= sv;
+        }
+        while (u != v) {
+            if (u > v) { u -= v; u >>= PBN_CTZ_D(u); }
+            else       { v -= u; v >>= PBN_CTZ_D(v); }
+        }
         u <<= sh;
         gp = PBZ_GROW(g, 2);
         gp[0] = (pbn_limb)u;
