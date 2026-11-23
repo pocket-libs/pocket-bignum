@@ -8,3 +8,6 @@
 # build output
 build/
 *.dSYM
+
+# python
+__pycache__/
