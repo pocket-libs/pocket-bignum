@@ -4434,11 +4434,19 @@ PBN_DEF char *pbf_get_str(char *str, pbf_exp_t *expptr, int b, size_t n, pbf_src
             long E = (long)floor(pbf_log2_abs(&v) * (log(2.0) / log((double)b))) + 1;
             pbz_ui_pow_ui(bm, (unsigned long)b, (unsigned long)m);
             pbz_ui_pow_ui(bm1, (unsigned long)b, (unsigned long)(m - 1));
+            /* find E on the truncated value (the double estimate can be off by one near
+               a power of b, and a rounded value can land exactly on b^(m-1) for the wrong E),
+               then round once */
             for (;;) {
-                pbf_scaled_int(q, &v, b, (long)m - E, rnd);
+                pbf_scaled_int(q, &v, b, (long)m - E, PBF_RNDZ);
                 if (pbz_cmp(q, bm) >= 0) { E++; continue; }
                 if (pbz_cmp(q, bm1) < 0) { E--; continue; }
                 break;
+            }
+            pbf_scaled_int(q, &v, b, (long)m - E, rnd);
+            if (pbz_cmp(q, bm) >= 0) {   /* rounded up to b^m */
+                pbz_set(q, bm1);
+                E++;
             }
             pbz_get_str(out + len, b, q);
             *expptr = E;
