@@ -2822,15 +2822,35 @@ static pbn_limb pbn_binvert_neg(pbn_limb m) {
     return (pbn_limb)0 - x;
 }
 
-/* Montgomery reduction: rp = tp * B^-n mod m, tp (2n limbs) destroyed */
+/* Montgomery reduction: rp = tp * B^-n mod m, tp (2n limbs, < m B^n) destroyed.
+   Two rows (quotient limbs q0, q1) per pass where addmul_2 is available */
 static void pbn_n_redc(pbn_limb *rp, pbn_limb *tp, const pbn_limb *mp, pbn_size n, pbn_limb minv) {
-    pbn_size i;
-    pbn_limb cy;
-    for (i = 0; i < n; i++) {
-        pbn_limb q = tp[i] * minv;
-        tp[i] = pbn_n_addmul_1(tp + i, mp, n, q);
+    pbn_size i = 0;
+    pbn_limb cy, top = 0;
+#if defined(PBN_HAVE_ADDMUL_2)
+    for (; n >= 2 && i + 2 <= n; i += 2) {
+        pbn_limb q0 = tp[i] * minv, q1, x0 = tp[i + n], x1 = tp[i + n + 1], hi, c;
+        /* q1 from limb i+1 as it will be once q0 m has been added */
+        pbn_dlimb t = (pbn_dlimb)q0 * mp[0] + tp[i];
+        t = (pbn_dlimb)q0 * mp[1] + tp[i + 1] + (pbn_limb)(t >> PBN_B);
+        q1 = (pbn_limb)t * minv;
+        /* tp[i..i+n] += m (q0 + q1 B) (limbs i, i+1 become 0; addmul_2 overwrites limb i+n
+           and returns limb i+n+1, so their old values are added back) */
+        hi = pbn_n_addmul_2(tp + i, mp, n, q0, q1);
+        tp[i + n] += x0;
+        c = tp[i + n] < x0;
+        hi += c;
+        c = hi < c;
+        tp[i + n + 1] = x1 + hi;
+        c += tp[i + n + 1] < hi;
+        if (c) top += pbn_n_add_1(tp + i + n + 2, tp + i + n + 2, n - i - 2, c);
     }
-    cy = pbn_n_add_n(rp, tp + n, tp, n);
+#endif
+    for (; i < n; i++) {
+        pbn_limb q = tp[i] * minv;
+        tp[i] = pbn_n_addmul_1(tp + i, mp, n, q);     /* carry for limb i+n, added below */
+    }
+    cy = pbn_n_add_n(rp, tp + n, tp, n) + top;
     if (cy || pbn_n_cmp(rp, mp, n) >= 0) pbn_n_sub_n(rp, rp, mp, n);
 }
 
