@@ -666,11 +666,18 @@ static void pbn_divzero(void) { PBN_ABORT("division by zero"); }
 /* pbn_n: raw limb-array kernels                                             */
 /* ------------------------------------------------------------------------- */
 
+/* (short ones inline: a library call costs more than copying a few limbs) */
 static void pbn_n_copy(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
-    if (rp != ap && n > 0) memmove(rp, ap, (size_t)n * sizeof(pbn_limb));
+    pbn_size i;
+    if (rp == ap || n <= 0) return;
+    if (n > 8) { memmove(rp, ap, (size_t)n * sizeof(pbn_limb)); return; }
+    if (rp < ap) for (i = 0; i < n; i++) rp[i] = ap[i];
+    else         for (i = n; i-- > 0;) rp[i] = ap[i];
 }
 static void pbn_n_zero(pbn_limb *rp, pbn_size n) {
-    if (n > 0) memset(rp, 0, (size_t)n * sizeof(pbn_limb));
+    pbn_size i;
+    if (n > 8) { memset(rp, 0, (size_t)n * sizeof(pbn_limb)); return; }
+    for (i = 0; i < n; i++) rp[i] = 0;
 }
 
 static int pbn_n_cmp(const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
@@ -4311,6 +4318,40 @@ PBN_INLINE pbn_limb pbn_bits_at(const pbn_limb *mp, pbn_size mn, long pos) {
     return v;
 }
 
+/* rp[i] = pbn_bits_at(mp, mn, i B + off) for i < n, by bulk copies & one shift pass */
+static void pbn_n_window(pbn_limb *rp, pbn_size n, const pbn_limb *mp, pbn_size mn, long off) {
+    pbn_size li, c, k;
+    unsigned bi;
+    if (off < 0) {
+        long z = -off;
+        li = (pbn_size)(z / PBN_B);
+        bi = (unsigned)(z % PBN_B);
+        if (li >= n) { pbn_n_zero(rp, n); return; }
+        pbn_n_zero(rp, li);
+        k = n - li;
+        c = PBN_MIN(k, mn);
+        if (bi) {
+            pbn_limb cy = pbn_n_lshift(rp + li, mp, c, bi);
+            if (k > c) { rp[li + c] = cy; pbn_n_zero(rp + li + c + 1, k - c - 1); }
+        } else {
+            pbn_n_copy(rp + li, mp, c);
+            pbn_n_zero(rp + li + c, k - c);
+        }
+        return;
+    }
+    li = (pbn_size)(off / PBN_B);
+    bi = (unsigned)(off % PBN_B);
+    if (li >= mn) { pbn_n_zero(rp, n); return; }
+    c = PBN_MIN(n, mn - li);
+    if (bi) {
+        pbn_n_rshift(rp, mp + li, c, bi);
+        if (li + c < mn) rp[c - 1] |= mp[li + c] << (PBN_B - bi);
+    } else {
+        pbn_n_copy(rp, mp + li, c);
+    }
+    pbn_n_zero(rp + c, n - c);
+}
+
 static int pbn_getbit(const pbn_limb *mp, pbn_size mn, long pos) {
     if (pos < 0 || pos >= (long)mn * PBN_B) return 0;
     return (int)((mp[pos / PBN_B] >> (pos % PBN_B)) & 1);
@@ -4398,7 +4439,7 @@ static int pbf_round(pbf_ptr r, int sign, const pbn_limb *mp, pbn_size mn, long 
     }
     L = pbn_bitlen_n(mp, mn);
     ex = e + L;
-    for (i = 0; i < n; i++) rp[i] = pbn_bits_at(mp, mn, (long)i * PBN_B - ((long)n * PBN_B - L));
+    pbn_n_window(rp, n, mp, mn, -((long)n * PBN_B - L));
 
     if (L <= p) {
         tern = sticky ? -sign : 0;
@@ -4549,7 +4590,7 @@ static int pbf_add_v(pbf_ptr r, pbf_view a, pbf_view b, pbf_rnd_t rnd, int chk) 
         long sh = a.e - u;
         tn = a.mn + (pbn_size)(sh / PBN_B) + 1;
         tp = PBN_TMP_GET(tb, tn);
-        for (i = 0; i < tn; i++) tp[i] = pbn_bits_at(a.mp, a.mn, (long)i * PBN_B - sh);
+        pbn_n_window(tp, tn, a.mp, a.mn, -sh);
         if (a.sign != b.sign) pbn_n_sub_1(tp, tp, tn, 1);
         tern = pbf_round(r, a.sign, tp, tn, u, 1, rnd, chk);
         PBN_TMP_PUT(tb, tp, tn);
@@ -4559,10 +4600,8 @@ static int pbf_add_v(pbf_ptr r, pbf_view a, pbf_view b, pbf_rnd_t rnd, int chk) 
     emn = PBN_MIN(a.e, b.e);
     tn = (pbn_size)((a.ex - emn) / PBN_B) + 2;
     tp = PBN_TMP_GET(tb, 2 * tn);
-    for (i = 0; i < tn; i++) {
-        tp[i]      = pbn_bits_at(a.mp, a.mn, (long)i * PBN_B - (a.e - emn));
-        tp[tn + i] = pbn_bits_at(b.mp, b.mn, (long)i * PBN_B - (b.e - emn));
-    }
+    pbn_n_window(tp, tn, a.mp, a.mn, -(a.e - emn));
+    pbn_n_window(tp + tn, tn, b.mp, b.mn, -(b.e - emn));
     if (a.sign == b.sign) pbn_n_add_n(tp, tp, tp + tn, tn);
     else                  pbn_n_sub_n(tp, tp, tp + tn, tn);
     i = tn;
@@ -4626,7 +4665,7 @@ static int pbf_div_v(pbf_ptr r, pbf_view a, pbf_view b, pbf_rnd_t rnd, int chk) 
     tsz = nn + qn + b.mn;
     tp = PBN_TMP_GET(tb, tsz);
     np = tp; qp = tp + nn; rp = qp + qn;
-    for (i = 0; i < nn; i++) np[i] = pbn_bits_at(a.mp, a.mn, (long)i * PBN_B - s);
+    pbn_n_window(np, nn, a.mp, a.mn, -s);
     pbn_n_tdiv_qr(qp, rp, np, nn, b.mp, b.mn);
     i = b.mn;
     PBN_NORM(rp, i);
