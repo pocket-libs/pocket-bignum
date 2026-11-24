@@ -37,6 +37,8 @@ sizes.each { |n| a = random_bits(n); b = random_bits(n); bench("mul", n) { a * b
 sizes.each { |n| a = random_bits(n); bench("sqr", n) { a * a } }
 sizes.each { |n| a = random_bits(2 * n); bench("sqrt", n) { Integer.sqrt(a) } }
 sizes.each { |n| a = random_bits(2 * n); b = random_bits(n); bench("div", n) { a.divmod(b) } }
+# (Integer#gcd is quadratic: minutes per call above this)
+sizes.select { |n| n <= 1024 }.each { |n| a = random_bits(n); b = random_bits(n); bench("gcd", n) { a.gcd(b) } }
 sizes.each do |n|
   a = random_bits(n)
   s = a.to_s
