@@ -2003,7 +2003,7 @@ PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
 
     if (n == 0) {
         s[len++] = '0';
-    } else if (base == 10 && n <= 3) {
+    } else if (base == 10 && n >= 2 && n <= 3) {
         /* small numbers: chunks of k digits, written backwards into a local buffer */
         char tmp[3 * 20 + 4];
         pbn_limb t3[3];
@@ -2027,10 +2027,24 @@ PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
         memcpy(s + len, tmp + pos, sizeof tmp - pos);
         len += sizeof tmp - pos;
     } else if (n == 1 && base == 10) {
+        /* one limb: two digits per step (constant divisors only), written backwards */
+        char tmp[20];
+        size_t pos = sizeof tmp;
         pbn_limb v = PTR(x)[0];
-        size_t a = len, b2;
-        while (v) { s[len++] = (char)('0' + v % 10); v /= 10; }
-        for (b2 = len - 1; a < b2; a++, b2--) { char c = s[a]; s[a] = s[b2]; s[b2] = c; }
+        while (v >= 100) {
+            unsigned d2 = (unsigned)(v % 100) * 2;
+            v /= 100;
+            tmp[--pos] = pbn_digit_pairs[d2 + 1];
+            tmp[--pos] = pbn_digit_pairs[d2];
+        }
+        if (v >= 10) {
+            tmp[--pos] = pbn_digit_pairs[2 * v + 1];
+            tmp[--pos] = pbn_digit_pairs[2 * v];
+        } else {
+            tmp[--pos] = (char)('0' + v);
+        }
+        memcpy(s + len, tmp + pos, sizeof tmp - pos);
+        len += sizeof tmp - pos;
     } else if ((lg = pbn_log2_exact(base)) != 0) {
         pbn_bitcnt bits = pbz_bitlen(x);
         pbn_bitcnt nd = (bits + (pbn_bitcnt)lg - 1) / (pbn_bitcnt)lg, i;
