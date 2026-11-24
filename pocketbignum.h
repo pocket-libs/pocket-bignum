@@ -3452,9 +3452,56 @@ static void pbn_lin2(pbn_limb *rp, pbn_limb x, const pbn_limb *ap, pbn_limb y, c
 
 #define PBN_LEHMER_BITS (PBN_B - 2)
 
+#if PBN_B == 64 && defined(__SIZEOF_INT128__) && !defined(PBN_PORTABLE)
+#  define PBN_LEHMER2 1
+typedef __int128 pbn_sdlimb;
+#  define PBN_LEHMER2_MAXE ((int64_t)1 << 62)    /* bound on the cofactors of a double-word step */
+#  ifndef PBN_GCD_LEHMER2_THRESHOLD
+#    define PBN_GCD_LEHMER2_THRESHOLD 100         /* limbs: double-word steps from here on */
+#  endif
+
+/* floor(n / d) for 0 <= n, 0 < d: by subtraction when small (the usual case), else from a
+   floating-point estimate, corrected; -1 if it's too big for a Lehmer step */
+PBN_INLINE pbn_sdlimb pbn_lehmer_q(pbn_sdlimb n, pbn_sdlimb d) {
+    pbn_sdlimb m = n, q;
+    double e;
+    if (m < d) return 0;
+    m -= d; if (m < d) return 1;
+    m -= d; if (m < d) return 2;
+    m -= d; if (m < d) return 3;
+    e = (double)n / (double)d;
+    if (e > 1e15) return -1;
+    q = (pbn_sdlimb)e;
+    while (q * d > n) q--;
+    while ((q + 1) * d <= n) q++;
+    return q;
+}
+
+/* {na, nb}[0..n) = (x0 a - y0 b, x1 a - y1 b) in one pass (both results >= 0) */
+static void pbn_lin2x2(pbn_limb *na, pbn_limb *nb, const pbn_limb *ap, const pbn_limb *bp, pbn_size n,
+                       pbn_limb x0, pbn_limb y0, pbn_limb x1, pbn_limb y1, int swap0, int swap1) {
+    pbn_limb c0p = 0, c0q = 0, c1p = 0, c1q = 0, w0 = 0, w1 = 0;
+    pbn_size i;
+    for (i = 0; i < n; i++) {
+        pbn_limb a = ap[i], b = bp[i], u, v, lo;
+        pbn_dlimb p0 = (pbn_dlimb)x0 * (swap0 ? b : a) + c0p, q0 = (pbn_dlimb)y0 * (swap0 ? a : b) + c0q;
+        pbn_dlimb p1 = (pbn_dlimb)x1 * (swap1 ? b : a) + c1p, q1 = (pbn_dlimb)y1 * (swap1 ? a : b) + c1q;
+        u = (pbn_limb)p0; v = (pbn_limb)q0;
+        lo = u - v; c0p = (pbn_limb)(p0 >> 64); c0q = (pbn_limb)(q0 >> 64);
+        na[i] = lo - w0; w0 = (u < v) + (lo < w0);
+        u = (pbn_limb)p1; v = (pbn_limb)q1;
+        lo = u - v; c1p = (pbn_limb)(p1 >> 64); c1q = (pbn_limb)(q1 >> 64);
+        nb[i] = lo - w1; w1 = (u < v) + (lo < w1);
+    }
+}
+#endif
+
 /* gcd of two positive numbers given as limb arrays (both destroyed, an,bn >= 1,
-   each buffer must hold max(an,bn)+1 limbs). *res points at the result, returns its size */
+   each buffer must hold max(an,bn)+1 limbs). *res points at the result, returns its size.
+   tp: 2 (max(an,bn)+1) limbs */
 static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *bp, pbn_size bn, pbn_limb *tp) {
+    pbn_size cap = PBN_MAX(an, bn) + 1;
+    pbn_limb *t0 = tp, *t1 = tp + cap;
     for (;;) {
         pbn_bitcnt abits;
         int64_t ah, bh, A, B, C, D;
@@ -3477,37 +3524,98 @@ static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *b
             break;
         }
 
+#if defined(PBN_LEHMER2)
+        if (abits > 128 && an >= PBN_GCD_LEHMER2_THRESHOLD) {
+            /* double-word Lehmer step on the leading 126 bits: cofactors up to 2^62, so each
+               step removes ~63 bits (Collins' test: both quotient bounds must agree) */
+            pbn_bitcnt sh = abits - 126;
+            pbn_sdlimb xa = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(ap, an, sh + 64) << 64) | pbn_getbits64(ap, an, sh));
+            pbn_sdlimb xb = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(bp, bn, sh + 64) << 64) | pbn_getbits64(bp, bn, sh));
+            int64_t a0 = 1, b0 = 0, c0 = 0, d0 = 1;
+            for (;;) {
+                pbn_sdlimb n1 = xa + a0, d1 = xb + c0, n2 = xa + b0, d2 = xb + d0, q, r2, tc, td;
+                if (d1 <= 0 || d2 <= 0 || n1 < 0 || n2 < 0) break;
+                q = pbn_lehmer_q(n1, d1);
+                if (q < 0) break;
+                r2 = n2 - q * d2;                 /* the other bound must give the same quotient */
+                if (r2 < 0 || r2 >= d2) break;
+                tc = (pbn_sdlimb)a0 - q * c0;
+                td = (pbn_sdlimb)b0 - q * d0;
+                if (tc >= PBN_LEHMER2_MAXE || tc <= -PBN_LEHMER2_MAXE || td >= PBN_LEHMER2_MAXE || td <= -PBN_LEHMER2_MAXE) break;
+                a0 = c0; c0 = (int64_t)tc;
+                b0 = d0; d0 = (int64_t)td;
+                tc = xa - q * xb; xa = xb; xb = tc;
+            }
+            if (b0 != 0) {
+                /* (a, b) <- (a0 a + b0 b, c0 a + d0 b): each row has one entry <= 0 */
+                pbn_limb *t;
+                pbn_n_zero(bp + bn, an - bn);
+                pbn_lin2x2(t0, t1, ap, bp, an,
+                           (pbn_limb)(b0 <= 0 ? a0 : b0), (pbn_limb)(b0 <= 0 ? -b0 : -a0),
+                           (pbn_limb)(d0 <= 0 ? c0 : d0), (pbn_limb)(d0 <= 0 ? -d0 : -c0),
+                           b0 > 0, d0 > 0);
+                t = ap; ap = t0; t0 = t;
+                t = bp; bp = t1; t1 = t;
+                bn = an;
+                PBN_NORM(ap, an);
+                PBN_NORM(bp, bn);
+                continue;
+            }
+            /* no progress: fall through to the single-word step / a full division */
+        }
+#endif
+
         /* Lehmer step on the leading bits */
         ah = (int64_t)pbn_getbits64(ap, an, abits - PBN_LEHMER_BITS);
         bh = (int64_t)pbn_getbits64(bp, bn, abits - PBN_LEHMER_BITS);
         A = 1; B = 0; C = 0; D = 1;
         for (;;) {
-            int64_t q, T;
-            if (bh + C <= 0 || bh + D <= 0) break;
-            q = (ah + A) / (bh + C);
-            if (q != (ah + B) / (bh + D)) break;
+            int64_t q, T, n1 = ah + A, d1 = bh + C, n2 = ah + B, d2 = bh + D;
+            if (d1 <= 0 || d2 <= 0) break;
+            /* quotient: by subtraction when small (the usual case) */
+            T = n1 - d1;
+            if (T < d1) q = n1 < d1 ? 0 : 1;
+            else if ((T -= d1) < d1) q = 2;
+            else if ((T -= d1) < d1) q = 3;
+            else q = n1 / d1;
+#if defined(PBN_LEHMER2)
+            {   /* the other bound must give the same quotient (checked by multiplying) */
+                pbn_sdlimb r2 = (pbn_sdlimb)n2 - (pbn_sdlimb)q * d2;
+                if (r2 < 0 || r2 >= d2) break;
+            }
+#else
+            if (q != n2 / d2) break;
+#endif
             T = A - q * C; A = C; C = T;
             T = B - q * D; B = D; D = T;
             T = ah - q * bh; ah = bh; bh = T;
         }
 
         if (B == 0) {
-            /* no progress from the leading digits: one full division step */
-            pbn_limb *qp = tp + bn;
-            pbn_n_tdiv_qr(qp, tp, ap, an, bp, bn);
-            pbn_n_copy(ap, tp, bn);
+            /* no progress from the leading digits: one full division step (quotient in t1,
+               remainder in t0, which becomes a) */
+            pbn_limb *t;
+            pbn_n_tdiv_qr(t1, t0, ap, an, bp, bn);
+            t = ap; ap = t0; t0 = t;
             an = bn;
             PBN_NORM(ap, an);
         } else {
             /* (a, b) <- (A a + B b, C a + D b); A,B (and C,D) never share a strict sign */
-            pbn_limb *na = tp, *nb = tp + an;
+            pbn_limb *t;
             pbn_n_zero(bp + bn, an - bn);
-            if (B <= 0) pbn_lin2(na, (pbn_limb)A, ap, (pbn_limb)-B, bp, an);
-            else        pbn_lin2(na, (pbn_limb)B, bp, (pbn_limb)-A, ap, an);
-            if (D <= 0) pbn_lin2(nb, (pbn_limb)C, ap, (pbn_limb)-D, bp, an);
-            else        pbn_lin2(nb, (pbn_limb)D, bp, (pbn_limb)-C, ap, an);
-            pbn_n_copy(ap, na, an);
-            pbn_n_copy(bp, nb, an);
+#if defined(PBN_LEHMER2)
+            pbn_lin2x2(t0, t1, ap, bp, an,
+                       (pbn_limb)(B <= 0 ? A : B), (pbn_limb)(B <= 0 ? -B : -A),
+                       (pbn_limb)(D <= 0 ? C : D), (pbn_limb)(D <= 0 ? -D : -C),
+                       B > 0, D > 0);
+#else
+            if (B <= 0) pbn_lin2(t0, (pbn_limb)A, ap, (pbn_limb)-B, bp, an);
+            else        pbn_lin2(t0, (pbn_limb)B, bp, (pbn_limb)-A, ap, an);
+            if (D <= 0) pbn_lin2(t1, (pbn_limb)C, ap, (pbn_limb)-D, bp, an);
+            else        pbn_lin2(t1, (pbn_limb)D, bp, (pbn_limb)-C, ap, an);
+#endif
+            t = ap; ap = t0; t0 = t;
+            t = bp; bp = t1; t1 = t;
             bn = an;
             PBN_NORM(ap, an);
             PBN_NORM(bp, bn);
