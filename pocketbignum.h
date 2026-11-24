@@ -2549,7 +2549,7 @@ static pbn_limb pbn_sqrtrem2(pbn_limb *rlo, pbn_limb *rhi, pbn_limb a1, pbn_limb
 
 static pbn_limb pbn_n_sqrtrem(pbn_limb *sp, pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
     pbn_size l, h;
-    pbn_limb *x, *qp, *q2, rc, lb, uc;
+    pbn_limb *x, *qp, *q2, rc, lb, uc, sc = 0;
     int hi;
 
     if (n == 1) {
@@ -2579,9 +2579,10 @@ static pbn_limb pbn_n_sqrtrem(pbn_limb *sp, pbn_limb *rp, const pbn_limb *ap, pb
     uc = pbn_n_lshift(rp + l, rp + l, h, 1);
     rp[l] |= lb;
 
-    /* s = s1*B^l + q, where q <= B^l */
+    /* s = s1*B^l + q, where q <= B^l; s may come out as B^n (sc = 1, sp = 0),
+       which is always too big: the correction below brings it back */
     pbn_n_copy(sp, qp, l);
-    if (qp[l]) pbn_n_add_1(sp + l, sp + l, h, 1);
+    if (qp[l]) sc = pbn_n_add_1(sp + l, sp + l, h, 1);
 
     /* r = u*B^l + a0 - q^2 */
     pbn_n_copy(rp, ap, l);
@@ -2597,6 +2598,7 @@ static pbn_limb pbn_n_sqrtrem(pbn_limb *sp, pbn_limb *rp, const pbn_limb *ap, pb
 
     /* at most one correction: r += 2s - 1, s -= 1 */
     if (hi < 0) {
+        hi += 2 * (int)sc;
         hi += (int)pbn_n_add_n(rp, rp, sp, n);
         hi += (int)pbn_n_add_n(rp, rp, sp, n);
         hi -= (int)pbn_n_sub_1(rp, rp, n, 1);

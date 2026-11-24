@@ -555,6 +555,11 @@ static void t_roots(void) {
     gen(a, ga);
     mpz_abs(ga, ga);
     if (rndn(3) == 0) { mpz_mul(ga, ga, ga); if (rndn(2)) mpz_sub_ui(ga, ga, rndn(2)); if (mpz_sgn(ga) < 0) mpz_set_ui(ga, 0); }
+    if (rndn(8) == 0) {
+        /* (2^k - 1) * 2^j: all-ones limbs over zero limbs (the root's s1*B^l + q carrying out) */
+        unsigned long k = 32 * (1 + rndn(12)), j = rndn(2) ? k : rndn(400);
+        mpz_set_ui(ga, 1); mpz_mul_2exp(ga, ga, k); mpz_sub_ui(ga, ga, 1); mpz_mul_2exp(ga, ga, j);
+    }
     from_gmp(a, ga);
     set_ctx(1, ga);
     cur_op = "sqrtrem";
