@@ -911,7 +911,7 @@ static int pbn_cpu_adx(void) {
 /* n a positive multiple of 4; cy: carry in (the limb to add at position 0) */
 static pbn_limb pbn_mul_1_adx(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b, pbn_limb cy) {
     pbn_limb l0, l1, l2, l3, h0, h1, h2;
-    long i = -(long)n;
+    long long i = -(long long)n;   /* 64-bit index register, also on LLP64 (Windows) */
     __asm__ __volatile__(
         "xor %k[l0], %k[l0]\n"                        /* CF = OF = 0 */
         "1:\n\t"
@@ -942,7 +942,7 @@ static pbn_limb pbn_mul_1_adx(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_
 
 static pbn_limb pbn_addmul_1_adx(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b, pbn_limb cy) {
     pbn_limb l0, l1, l2, l3, h0, h1, h2;
-    long i = -(long)n;
+    long long i = -(long long)n;   /* 64-bit index register, also on LLP64 (Windows) */
     __asm__ __volatile__(
         "xor %k[l0], %k[l0]\n"                        /* CF = OF = 0 */
         "1:\n\t"
@@ -978,7 +978,7 @@ static pbn_limb pbn_addmul_1_adx(pbn_limb *rp, const pbn_limb *ap, pbn_size n, p
 
 static pbn_limb pbn_submul_1_adx(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b, pbn_limb cy) {
     pbn_limb l0, l1, l2, l3, h0, h1, h2;
-    long i = -(long)n;
+    long long i = -(long long)n;   /* 64-bit index register, also on LLP64 (Windows) */
     __asm__ __volatile__(
         "xor %k[l0], %k[l0]\n\t"                      /* CF = OF = 0 */
         "stc\n"                                       /* CF = 1: r - x = r + ~x + 1 */
