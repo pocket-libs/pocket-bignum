@@ -3170,12 +3170,13 @@ static pbn_limb pbn_gcd_limb(pbn_limb a, pbn_limb b) {
     s = pbn_ctz(a | b);
     a >>= pbn_ctz(a);
     b >>= pbn_ctz(b);
-    /* both odd: replace the larger by |a - b| (even, non-zero), shifted; branchless */
+    /* both odd: (a, b) <- (min, |a - b| >> ctz); ctz(a - b) == ctz(|a - b|), so the count
+       doesn't wait for the min/abs selection */
     while (a != b) {
-        pbn_limb t = a - b, m = (pbn_limb)0 - (pbn_limb)(a < b);
-        b += t & m;
-        a = (t ^ m) - m;
-        a >>= pbn_ctz(a);
+        pbn_limb d = a - b, lo = a < b ? a : b;
+        int z = pbn_ctz(d);
+        b = (a < b ? b - a : d) >> z;
+        a = lo;
     }
     return a << s;
 }
@@ -3310,10 +3311,13 @@ PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
             u >>= su;
             v >>= sv;
         }
-        while (u != v) {
+        /* 2-limb steps only while one of them doesn't fit in a limb */
+        while ((u >> PBN_B) | (v >> PBN_B)) {
             if (u > v) { u -= v; u >>= PBN_CTZ_D(u); }
-            else       { v -= u; v >>= PBN_CTZ_D(v); }
+            else if (v > u) { v -= u; v >>= PBN_CTZ_D(v); }
+            else break;
         }
+        if (!((u >> PBN_B) | (v >> PBN_B))) u = pbn_gcd_limb((pbn_limb)u, (pbn_limb)v);
         u <<= sh;
         gp = PBZ_GROW(g, 2);
         gp[0] = (pbn_limb)u;
