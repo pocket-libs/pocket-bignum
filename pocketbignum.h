@@ -866,7 +866,7 @@ static pbn_limb pbn_n_divrem_1(pbn_limb *qp, const pbn_limb *np, pbn_size n, pbn
 }
 
 /* ---- schoolbook division (Knuth D). qp: nn-dn+1 limbs, rp: dn limbs ---- */
-static void pbn_n_tdiv_qr(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
+static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
                           const pbn_limb *dp, pbn_size dn) {
     int s;
     pbn_limb *u, *dd, d1, d0, di;
@@ -1233,6 +1233,107 @@ static void pbn_n_mul(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_l
         pbn_n_add_1(rp + off + bn, pp + bn, rem, cy);
     }
     PBN_TMP_FREE(tp, itch);
+}
+
+/* ---- division: divide & conquer above a threshold (Burnikel & Ziegler; Brent &
+        Zimmermann, Modern Computer Arithmetic, Algorithm 1.8), on top of Karatsuba/Toom ---- */
+
+#ifndef PBN_DC_DIV_THRESHOLD
+#  define PBN_DC_DIV_THRESHOLD 70      /* quotient & divisor limbs */
+#endif
+
+/* {ap, n+m} / {bp, n} for a normalized divisor (top bit set) and m <= n: the quotient is
+   qh * B^m + {qp, m} (qh, 0 or 1, is returned), the remainder is left in ap[0..n) */
+static pbn_limb pbn_dc_divrem(pbn_limb *qp, pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_size m) {
+    pbn_size k, tn;
+    pbn_limb qh, qh0, *tp;
+    int hi;
+
+    if (m < PBN_DC_DIV_THRESHOLD || m < 2) {
+        pbn_limb *t = PBN_TMP_ALLOC(m + 1 + n);
+        pbn_n_tdiv_qr_basecase(t, t + m + 1, ap, n + m, bp, n);
+        pbn_n_copy(qp, t, m);
+        qh = t[m];
+        pbn_n_copy(ap, t + m + 1, n);
+        PBN_TMP_FREE(t, m + 1 + n);
+        return qh;
+    }
+
+    k = m / 2;
+    tp = PBN_TMP_ALLOC(m + 1);
+
+    /* (Q1, R1) = (A div B^2k) / B1, with B1 = B div B^k: Q1 -> qp[k..m) (+ qh), R1 -> ap[2k..n+k) */
+    qh = pbn_dc_divrem(qp + k, ap + 2 * k, bp + k, n - k, m - k);
+
+    /* A' = R1 B^2k + A mod B^2k - Q1 B0 B^k (in ap[0..n+k)), B0 = B mod B^k */
+    pbn_n_mul(tp, qp + k, m - k, bp, k);
+    tp[m] = qh ? pbn_n_add_n(tp + m - k, tp + m - k, bp, k) : 0;
+    tn = m + 1;
+    hi = -(int)pbn_n_sub(ap + k, ap + k, n, tp, PBN_MIN(tn, n));
+    if (tn > n) hi -= (int)tp[n];
+    while (hi < 0) {                   /* at most twice: Q1 -= 1, A' += B^k B */
+        qh -= pbn_n_sub_1(qp + k, qp + k, m - k, 1);
+        hi += (int)pbn_n_add_n(ap + k, ap + k, bp, n);
+    }
+
+    /* (Q0, R0) = (A' div B^k) / B1: Q0 -> qp[0..k) (+ qh0, carried into Q1), R0 -> ap[k..n) */
+    qh0 = pbn_dc_divrem(qp, ap + k, bp + k, n - k, k);
+    qh += pbn_n_add_1(qp + k, qp + k, m - k, qh0);
+
+    /* A'' = R0 B^k + A' mod B^k - Q0 B0 (in ap[0..n)) */
+    pbn_n_mul(tp, qp, k, bp, k);
+    tp[2 * k] = qh0 ? pbn_n_add_n(tp + k, tp + k, bp, k) : 0;
+    tn = 2 * k + 1;
+    hi = -(int)pbn_n_sub(ap, ap, n, tp, PBN_MIN(tn, n));
+    if (tn > n) hi -= (int)tp[n];
+    while (hi < 0) {                   /* at most twice: Q -= 1, A'' += B */
+        qh -= pbn_n_sub_1(qp, qp, m, 1);
+        hi += (int)pbn_n_add_n(ap, ap, bp, n);
+    }
+
+    PBN_TMP_FREE(tp, m + 1);
+    return qh;
+}
+
+/* divide & conquer {np, nn} / {dp, dn}: qp gets nn-dn+1 limbs, rp dn limbs */
+static void pbn_n_tdiv_qr_dc(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
+                             const pbn_limb *dp, pbn_size dn) {
+    int s = pbn_clz(dp[dn - 1]);
+    pbn_size m = nn + 1 - dn, pos, r;
+    pbn_limb *u = PBN_TMP_ALLOC(nn + 1 + dn), *dd = u + nn + 1;
+
+    if (s) {
+        pbn_n_lshift(dd, dp, dn, (unsigned)s);
+        u[nn] = pbn_n_lshift(u, np, nn, (unsigned)s);
+    } else {
+        pbn_n_copy(dd, dp, dn);
+        pbn_n_copy(u, np, nn);
+        u[nn] = 0;
+    }
+
+    /* the quotient (m limbs) in blocks of dn limbs from the top; each block's dividend has
+       the previous remainder (< divisor) on top */
+    r = m % dn;
+    if (r == 0) r = dn;
+    pos = m - r;
+    pbn_dc_divrem(qp + pos, u + pos, dd, dn, r);
+    while (pos > 0) {
+        pos -= dn;
+        pbn_dc_divrem(qp + pos, u + pos, dd, dn, dn);
+    }
+
+    if (s) pbn_n_rshift(rp, u, dn, (unsigned)s);
+    else   pbn_n_copy(rp, u, dn);
+    PBN_TMP_FREE(u, nn + 1 + dn);
+}
+
+/* qp: nn-dn+1 limbs, rp: dn limbs; nothing may overlap */
+static void pbn_n_tdiv_qr(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
+                          const pbn_limb *dp, pbn_size dn) {
+    if (dn >= PBN_DC_DIV_THRESHOLD && nn - dn + 1 >= PBN_DC_DIV_THRESHOLD)
+        pbn_n_tdiv_qr_dc(qp, rp, np, nn, dp, dn);
+    else
+        pbn_n_tdiv_qr_basecase(qp, rp, np, nn, dp, dn);
 }
 
 /* ------------------------------------------------------------------------- */
