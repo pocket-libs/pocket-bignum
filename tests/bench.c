@@ -93,8 +93,8 @@ int main(int argc, char **argv) {
         free(s);
     }
     {
-        static const unsigned long facs[] = { 100, 1000, 10000, 100000 };
-        for (i = 0; i < 4; i++) {
+        static const unsigned long facs[] = { 20, 50, 100, 300, 1000, 10000, 100000 };
+        for (i = 0; i < sizeof facs / sizeof facs[0]; i++) {
             if (quick && facs[i] > 10000) break;
             BENCH("fac_ui", (long)facs[i], pbz_fac_ui(c, facs[i]), mpz_fac_ui(gc, facs[i]));
         }
