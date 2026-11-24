@@ -427,6 +427,12 @@ extern "C" {
 #ifndef PBN_MUL_TOOM3_THRESHOLD
 #  define PBN_MUL_TOOM3_THRESHOLD 100
 #endif
+#ifndef PBN_MUL_TOOM4_THRESHOLD
+#  define PBN_MUL_TOOM4_THRESHOLD 300
+#endif
+#ifndef PBN_SQR_TOOM4_THRESHOLD
+#  define PBN_SQR_TOOM4_THRESHOLD 400
+#endif
 #ifndef PBN_SQR_TOOM3_THRESHOLD
 #  define PBN_SQR_TOOM3_THRESHOLD 160
 #endif
@@ -1172,11 +1178,21 @@ static void pbn_n_mul_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pb
 static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp);
 
 #define PBN_TOOM3_MIN 5     /* smallest size Toom-3 can split (k = ceil(n/3), n - 2k >= 1) */
+#define PBN_TOOM4_MIN 13    /* smallest size Toom-4 can split (k = ceil(n/4), n - 3k >= 1) */
+
+#define PBN_USE_TOOM4(n, thr)  ((n) >= (thr) && (n) >= PBN_TOOM4_MIN)
+#define PBN_USE_TOOM3(n, thr)  ((n) >= (thr) && (n) >= PBN_TOOM3_MIN)
 
 static pbn_size pbn_mul_itch(pbn_size n) {
     pbn_size k, a, b;
     if (n < PBN_MUL_KARA_THRESHOLD) return 0;
-    if (n < PBN_MUL_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN) return PBN_KARA_ITCH(n);
+    if (PBN_USE_TOOM4(n, PBN_MUL_TOOM4_THRESHOLD)) {
+        k = (n + 3) / 4;
+        a = pbn_mul_itch(k);
+        b = pbn_mul_itch(k + 1);
+        return 10 * (k + 1) + 6 * (2 * k + 2) + PBN_MAX(a, b);
+    }
+    if (!PBN_USE_TOOM3(n, PBN_MUL_TOOM3_THRESHOLD)) return PBN_KARA_ITCH(n);
     k = (n + 2) / 3;
     a = pbn_mul_itch(k);
     b = pbn_mul_itch(k + 1);
@@ -1186,7 +1202,13 @@ static pbn_size pbn_mul_itch(pbn_size n) {
 static pbn_size pbn_sqr_itch(pbn_size n) {
     pbn_size k, a, b;
     if (n < PBN_SQR_KARA_THRESHOLD) return 0;
-    if (n < PBN_SQR_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN) return PBN_KARA_ITCH(n);
+    if (PBN_USE_TOOM4(n, PBN_SQR_TOOM4_THRESHOLD)) {
+        k = (n + 3) / 4;
+        a = pbn_sqr_itch(k);
+        b = pbn_sqr_itch(k + 1);
+        return 5 * (k + 1) + 6 * (2 * k + 2) + PBN_MAX(a, b);
+    }
+    if (!PBN_USE_TOOM3(n, PBN_SQR_TOOM3_THRESHOLD)) return PBN_KARA_ITCH(n);
     k = (n + 2) / 3;
     a = pbn_sqr_itch(k);
     b = pbn_sqr_itch(k + 1);
@@ -1205,6 +1227,22 @@ static void pbn_n_divexact_by3(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
         q = s * inv3;
         rp[i] = q;
         pbn_umul(q, 3, &hi);
+        c = hi + b;
+    }
+}
+
+/* rp = ap / d for an exact multiple of an odd d (same method, any odd d) */
+static void pbn_n_divexact_odd(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb d) {
+    pbn_limb inv = d, c = 0, hi;     /* inv = d^-1 mod B by Newton: 3 -> 6 -> ... bits */
+    pbn_size i;
+    int j;
+    for (j = 0; j < 6; j++) inv *= 2 - d * inv;
+    for (i = 0; i < n; i++) {
+        pbn_limb a = ap[i], s = a - c, q;
+        pbn_limb b = a < c;
+        q = s * inv;
+        rp[i] = q;
+        pbn_umul(q, d, &hi);
         c = hi + b;
     }
 }
@@ -1316,24 +1354,183 @@ static void pbn_n_toom3_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_li
     pbn_toom3_interpolate(rp, k, r, r1, rm, 0, r2, t);
 }
 
+/* ---- Toom-4 (evaluation at 0, 1, -1, 2, -2, 1/2, oo) ----
+   a = a0 + a1 x + a2 x^2 + a3 x^3 (x = B^k, a3 of r limbs), b likewise; the product has
+   coefficients c0..c6 (all >= 0). With v(t) = a(t) b(t) and vh = 64 v(1/2), interpolation
+   keeps every intermediate non-negative:
+       S1 = (v(1) + v(-1)) / 2 = c0 + c2 + c4 + c6,     D1 = (v(1) - v(-1)) / 2 = c1 + c3 + c5
+       S2 = (v(2) + v(-2)) / 2 = c0 + 4c2 + 16c4 + 64c6, D2 = (v(2) - v(-2)) / 4 = c1 + 4c3 + 16c5
+       c4 = ((S2 - c0 - 64c6) / 4 - (S1 - c0 - c6)) / 3,  c2 = S1 - c0 - c6 - c4
+       H  = (vh - 64c0 - 16c2 - 4c4 - c6) / 2 = 16c1 + 4c3 + c5
+       c5 = (4 D2 + H - 20 D1) / 45,  c3 = (D2 - D1) / 3 - 5c5,  c1 = D1 - c3 - c5  */
+
+/* t = (s << sh) + a (k+1 limbs, s of sn <= k+1 limbs, a of an <= k limbs) */
+static void pbn_toom4_lsh_add(pbn_limb *t, const pbn_limb *s, pbn_size sn, unsigned sh, const pbn_limb *a,
+                              pbn_size an, pbn_size k) {
+    pbn_n_zero(t, k + 1);
+    pbn_n_copy(t, s, sn);
+    if (sh) pbn_n_lshift(t, t, k + 1, sh);
+    pbn_n_add(t, t, k + 1, a, an);
+}
+
+/* v1 = a(1), vm1 = |a(-1)|, v2 = a(2), vm2 = |a(-2)|, vh = 8 a(1/2); each k+1 limbs.
+   Returns the signs of a(-1) (bit 0) and a(-2) (bit 1). t: 2(k+1) limbs */
+static int pbn_toom4_eval(pbn_limb *v1, pbn_limb *vm1, pbn_limb *v2, pbn_limb *vm2, pbn_limb *vh,
+                          const pbn_limb *ap, pbn_size k, pbn_size r, pbn_limb *t) {
+    const pbn_limb *a0 = ap, *a1 = ap + k, *a2 = ap + 2 * k, *a3 = ap + 3 * k;
+    pbn_limb *t0 = t, *t1 = t + (k + 1);
+    int s = 0;
+    /* +-1: t0 = a0 + a2, t1 = a1 + a3 */
+    t0[k] = pbn_n_add_n(t0, a0, a2, k);
+    t1[k] = pbn_n_add(t1, a1, k, a3, r);
+    pbn_n_add_n(v1, t0, t1, k + 1);
+    s |= pbn_absdiff(vm1, t0, k + 1, t1, k + 1);
+    /* +-2: t0 = a0 + 4 a2, t1 = 2 a1 + 8 a3 */
+    pbn_toom4_lsh_add(t0, a2, k, 2, a0, k, k);
+    pbn_toom4_lsh_add(t1, a3, r, 2, a1, k, k);
+    pbn_n_lshift(t1, t1, k + 1, 1);
+    pbn_n_add_n(v2, t0, t1, k + 1);
+    s |= pbn_absdiff(vm2, t0, k + 1, t1, k + 1) << 1;
+    /* 1/2: vh = ((2 a0 + a1) 2 + a2) 2 + a3 */
+    pbn_toom4_lsh_add(vh, a0, k, 1, a1, k, k);
+    pbn_n_lshift(vh, vh, k + 1, 1);
+    pbn_n_add(vh, vh, k + 1, a2, k);
+    pbn_n_lshift(vh, vh, k + 1, 1);
+    pbn_n_add(vh, vh, k + 1, a3, r);
+    return s;
+}
+
+/* x -= {c, cn} * m over w limbs (the result must be >= 0) */
+static void pbn_toom4_submul(pbn_limb *x, pbn_size w, const pbn_limb *c, pbn_size cn, pbn_limb m) {
+    pbn_limb bw;
+    PBN_NORM(c, cn);
+    if (cn == 0) return;
+    bw = m == 1 ? pbn_n_sub_n(x, x, c, cn) : pbn_n_submul_1(x, c, cn, m);
+    if (cn < w) pbn_n_sub_1(x + cn, x + cn, w - cn, bw);
+}
+
+/* v1, vm1, v2, vm2, vh: the products at 1, -1 (sign bit 0 of neg), 2, -2 (bit 1), 1/2 (times
+   64), each w = 2k+2 limbs; c0 at rp[0..2k), c6 at rp[6k..6k+2r). Leaves the product in
+   rp[0..6k+2r); destroys the products. t: w limbs */
+static void pbn_toom4_interpolate(pbn_limb *rp, pbn_size k, pbn_size r, pbn_limb *v1, pbn_limb *vm1,
+                                  pbn_limb *v2, pbn_limb *vm2, pbn_limb *vh, int neg, pbn_limb *t) {
+    pbn_size w = 2 * k + 2, rn = 6 * k + 2 * r;
+    const pbn_limb *c0 = rp, *c6 = rp + 6 * k;
+
+    /* v1 = D1, vm1 = S1 */
+    if (!(neg & 1)) { pbn_n_sub_n(t, v1, vm1, w); pbn_n_add_n(vm1, v1, vm1, w); }
+    else            { pbn_n_add_n(t, v1, vm1, w); pbn_n_sub_n(vm1, v1, vm1, w); }
+    pbn_n_rshift(v1, t, w, 1);
+    pbn_n_rshift(vm1, vm1, w, 1);
+    /* v2 = D2, vm2 = S2 */
+    if (!(neg & 2)) { pbn_n_sub_n(t, v2, vm2, w); pbn_n_add_n(vm2, v2, vm2, w); }
+    else            { pbn_n_add_n(t, v2, vm2, w); pbn_n_sub_n(vm2, v2, vm2, w); }
+    pbn_n_rshift(v2, t, w, 2);
+    pbn_n_rshift(vm2, vm2, w, 1);
+
+    /* even part: vm1 = E1 = S1 - c0 - c6, vm2 = E2 = (S2 - c0 - 64 c6) / 4 */
+    pbn_toom4_submul(vm1, w, c0, 2 * k, 1);
+    pbn_toom4_submul(vm1, w, c6, 2 * r, 1);
+    pbn_toom4_submul(vm2, w, c0, 2 * k, 1);
+    pbn_toom4_submul(vm2, w, c6, 2 * r, 64);
+    pbn_n_rshift(vm2, vm2, w, 2);
+    /* vm2 = c4 = (E2 - E1) / 3, vm1 = c2 = E1 - c4 */
+    pbn_n_sub_n(vm2, vm2, vm1, w);
+    pbn_n_divexact_by3(vm2, vm2, w);
+    pbn_n_sub_n(vm1, vm1, vm2, w);
+
+    /* vh = H = (vh - 64 c0 - 16 c2 - 4 c4 - c6) / 2 */
+    pbn_toom4_submul(vh, w, c0, 2 * k, 64);
+    pbn_toom4_submul(vh, w, vm1, w, 16);
+    pbn_toom4_submul(vh, w, vm2, w, 4);
+    pbn_toom4_submul(vh, w, c6, 2 * r, 1);
+    pbn_n_rshift(vh, vh, w, 1);
+
+    /* odd part: t = c5 = (4 D2 + H - 20 D1) / 45 */
+    pbn_n_lshift(t, v2, w, 2);
+    pbn_n_add_n(t, t, vh, w);
+    pbn_toom4_submul(t, w, v1, w, 20);
+    pbn_n_divexact_odd(t, t, w, 45);
+    /* v2 = c3 = (D2 - D1) / 3 - 5 c5, v1 = c1 = D1 - c3 - c5 */
+    pbn_n_sub_n(v2, v2, v1, w);
+    pbn_n_divexact_by3(v2, v2, w);
+    pbn_toom4_submul(v2, w, t, w, 5);
+    pbn_n_sub_n(v1, v1, v2, w);
+    pbn_n_sub_n(v1, v1, t, w);
+
+    /* assemble: c0 | c6 already in place */
+    pbn_n_zero(rp + 2 * k, 4 * k);
+    pbn_add_at(rp, rn, k, v1, w);
+    pbn_add_at(rp, rn, 2 * k, vm1, w);
+    pbn_add_at(rp, rn, 3 * k, v2, w);
+    pbn_add_at(rp, rn, 4 * k, vm2, w);
+    pbn_add_at(rp, rn, 5 * k, t, w);
+}
+
+static void pbn_n_toom4_mul(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb *tp) {
+    pbn_size k = (n + 3) / 4, r = n - 3 * k, w = 2 * k + 2, e = k + 1;
+    pbn_limb *a1 = tp, *am1 = a1 + e, *a2 = am1 + e, *am2 = a2 + e, *ah = am2 + e;
+    pbn_limb *b1 = ah + e, *bm1 = b1 + e, *b2 = bm1 + e, *bm2 = b2 + e, *bh = bm2 + e;
+    pbn_limb *v1 = bh + e, *vm1 = v1 + w, *v2 = vm1 + w, *vm2 = v2 + w, *vh = vm2 + w, *t = vh + w;
+    pbn_limb *ws = t + w;
+    int neg;
+
+    /* evaluations use the product area as scratch (2(k+1) <= w limbs) */
+    neg  = pbn_toom4_eval(a1, am1, a2, am2, ah, ap, k, r, v1);
+    neg ^= pbn_toom4_eval(b1, bm1, b2, bm2, bh, bp, k, r, v1);
+
+    pbn_n_mul_n(v1, a1, b1, e, ws);
+    pbn_n_mul_n(vm1, am1, bm1, e, ws);
+    pbn_n_mul_n(v2, a2, b2, e, ws);
+    pbn_n_mul_n(vm2, am2, bm2, e, ws);
+    pbn_n_mul_n(vh, ah, bh, e, ws);
+    pbn_n_mul_n(rp, ap, bp, k, ws);                              /* c0 */
+    pbn_n_mul_n(rp + 6 * k, ap + 3 * k, bp + 3 * k, r, ws);      /* c6 */
+
+    pbn_toom4_interpolate(rp, k, r, v1, vm1, v2, vm2, vh, neg, t);
+}
+
+static void pbn_n_toom4_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
+    pbn_size k = (n + 3) / 4, r = n - 3 * k, w = 2 * k + 2, e = k + 1;
+    pbn_limb *a1 = tp, *am1 = a1 + e, *a2 = am1 + e, *am2 = a2 + e, *ah = am2 + e;
+    pbn_limb *v1 = ah + e, *vm1 = v1 + w, *v2 = vm1 + w, *vm2 = v2 + w, *vh = vm2 + w, *t = vh + w;
+    pbn_limb *ws = t + w;
+
+    pbn_toom4_eval(a1, am1, a2, am2, ah, ap, k, r, v1);
+
+    pbn_n_sqr_n(v1, a1, e, ws);
+    pbn_n_sqr_n(vm1, am1, e, ws);
+    pbn_n_sqr_n(v2, a2, e, ws);
+    pbn_n_sqr_n(vm2, am2, e, ws);
+    pbn_n_sqr_n(vh, ah, e, ws);
+    pbn_n_sqr_n(rp, ap, k, ws);                                  /* c0 */
+    pbn_n_sqr_n(rp + 6 * k, ap + 3 * k, r, ws);                  /* c6 */
+
+    pbn_toom4_interpolate(rp, k, r, v1, vm1, v2, vm2, vh, 0, t);
+}
+
 /* rp[0..2n) = a * b (n limbs each); tp: pbn_mul_itch(n) limbs */
 static void pbn_n_mul_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb *tp) {
     if (n < PBN_MUL_KARA_THRESHOLD)
         pbn_n_mul_basecase(rp, ap, n, bp, n);
-    else if (n < PBN_MUL_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN)
-        pbn_n_kara_mul(rp, ap, bp, n, tp);
-    else
+    else if (PBN_USE_TOOM4(n, PBN_MUL_TOOM4_THRESHOLD))
+        pbn_n_toom4_mul(rp, ap, bp, n, tp);
+    else if (PBN_USE_TOOM3(n, PBN_MUL_TOOM3_THRESHOLD))
         pbn_n_toom3_mul(rp, ap, bp, n, tp);
+    else
+        pbn_n_kara_mul(rp, ap, bp, n, tp);
 }
 
 /* rp[0..2n) = a^2; tp: pbn_sqr_itch(n) limbs */
 static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *tp) {
     if (n < PBN_SQR_KARA_THRESHOLD)
         pbn_n_sqr_basecase(rp, ap, n);
-    else if (n < PBN_SQR_TOOM3_THRESHOLD || n < PBN_TOOM3_MIN)
-        pbn_n_kara_sqr(rp, ap, n, tp);
-    else
+    else if (PBN_USE_TOOM4(n, PBN_SQR_TOOM4_THRESHOLD))
+        pbn_n_toom4_sqr(rp, ap, n, tp);
+    else if (PBN_USE_TOOM3(n, PBN_SQR_TOOM3_THRESHOLD))
         pbn_n_toom3_sqr(rp, ap, n, tp);
+    else
+        pbn_n_kara_sqr(rp, ap, n, tp);
 }
 
 static void pbn_n_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
