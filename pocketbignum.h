@@ -3546,9 +3546,17 @@ PBN_DEF void pbz_fac_ui(pbz_ptr r, unsigned long n) {
     }
     if ((pbn_limb)n != n) PBN_ABORT("factorial argument too large");
     if (n >= PBN_FAC_SWING_THRESHOLD) { pbn_fac_swing(r, n); return; }
-    /* odd part directly, then the power of 2 (n - popcount(n)) by a shift */
-    pbn_fac_odd(r, n);
-    pbz_mul_2exp(r, r, (pbn_bitcnt)(n - pbn_popcount_ul(n)));
+    {
+        /* direct product of 2..n, packed into limbs (small n: no separate power of 2, its
+           shift would cost more than it saves) */
+        pbn_size cnt = 0, cap = (pbn_size)(n / 2 + 2);
+        pbn_limb cur = 1, *v = PBN_TMP_ALLOC(cap);
+        unsigned long i;
+        for (i = 2; i <= n; i++) pbn_fac_push(v, &cnt, &cur, (pbn_limb)i);
+        v[cnt++] = cur;
+        pbn_prod_limbs(r, v, 0, cnt);
+        PBN_TMP_FREE(v, cap);
+    }
 }
 
 /* ---- primality ---- */
