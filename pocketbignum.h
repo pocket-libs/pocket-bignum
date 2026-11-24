@@ -3440,27 +3440,25 @@ static void pbn_prod_limbs(pbz_ptr r, const pbn_limb *v, pbn_size lo, pbn_size h
 
 /* multiplies x into the packed limb list (several factors per limb) */
 PBN_INLINE void pbn_fac_push(pbn_limb *v, pbn_size *cnt, pbn_limb *cur, pbn_limb x) {
-    if (*cur > PBN_LIMB_MAX / x) {
+    pbn_limb hi, lo = pbn_umul(*cur, x, &hi);   /* overflow check by multiplying, no division */
+    if (hi) {
         v[(*cnt)++] = *cur;
-        *cur = 1;
+        *cur = x;
+    } else {
+        *cur = lo;
     }
-    *cur *= x;
 }
 
-/* r = 2 * 3 * ... * m (m >= 1), multiplying packed limbs with a product tree */
-static void pbn_fac_plain(pbz_ptr r, unsigned long m) {
+/* r = oddpart(m!) = the product of the odd parts of 2..m (m >= 1), packed into limbs
+   and multiplied with a product tree */
+static void pbn_fac_odd(pbz_ptr r, unsigned long m) {
     pbn_size cnt = 0, cap = (pbn_size)(m / 2 + 2);
     pbn_limb cur = 1, *v;
     unsigned long i;
     if (PBN_B == 32 && m > 65535UL) cap = (pbn_size)(m + 2);
     v = PBN_TMP_ALLOC(cap);
-    for (i = 2; i <= m; i++) {
-        if (cur > PBN_LIMB_MAX / (pbn_limb)i) {
-            v[cnt++] = cur;
-            cur = 1;
-        }
-        cur *= (pbn_limb)i;
-    }
+    for (i = 3; i <= m; i++)
+        pbn_fac_push(v, &cnt, &cur, (pbn_limb)i >> pbn_ctz((pbn_limb)i));
     v[cnt++] = cur;
     pbn_prod_limbs(r, v, 0, cnt);
     PBN_TMP_FREE(v, cap);
@@ -3485,8 +3483,7 @@ static PBN_NOINLINE void pbn_fac_swing(pbz_ptr r, unsigned long n) {
     for (m = n; m >= PBN_FAC_SWING_THRESHOLD; m >>= 1) levels[nl++] = m;
 
     /* oddpart(m!) for the smallest level, directly */
-    pbn_fac_plain(r, m);
-    if (m >= 2) pbz_tdiv_q_2exp(r, r, (pbn_bitcnt)(m - pbn_popcount_ul(m)));
+    pbn_fac_odd(r, m);
 
     /* odd primes up to n: comp[i] != 0 if 2i+1 is composite */
     half = n / 2 + 1;
@@ -3528,36 +3525,30 @@ static PBN_NOINLINE void pbn_fac_swing(pbz_ptr r, unsigned long n) {
     pbz_mul_2exp(r, r, (pbn_bitcnt)(n - pbn_popcount_ul(n)));
 }
 
+/* 0! .. 20! (the ones fitting in 64 bits) */
+static const uint64_t pbn_fac_tab[21] = {
+    1u, 1u, 2u,
+    6u, 24u, 120u,
+    720u, 5040u, 40320u,
+    362880u, 3628800u, 39916800u,
+    479001600u, 6227020800u, 87178291200u,
+    1307674368000u, 20922789888000u, 355687428096000u,
+    6402373705728000u, 121645100408832000u, 2432902008176640000u
+};
+
 PBN_DEF void pbz_fac_ui(pbz_ptr r, unsigned long n) {
-    pbn_limb *v, cur = 1;
-    pbn_size cnt = 0, cap;
-    unsigned long i;
-    if (n < 2) { pbz_set_ui(r, 1); return; }
-    if ((pbn_limb)n != n) PBN_ABORT("factorial argument too large");
     if (n <= (PBN_B == 64 ? 20UL : 12UL)) {
         /* n! fits in a limb */
-        pbn_limb *rp;
-        for (i = 2; i <= n; i++) cur *= (pbn_limb)i;
-        rp = PBZ_GROW(r, 1);
-        rp[0] = cur;
+        pbn_limb *rp = PBZ_GROW(r, 1);
+        rp[0] = (pbn_limb)pbn_fac_tab[n];
         SIZ(r) = 1;
         return;
     }
+    if ((pbn_limb)n != n) PBN_ABORT("factorial argument too large");
     if (n >= PBN_FAC_SWING_THRESHOLD) { pbn_fac_swing(r, n); return; }
-    /* direct product: every limb packs >= 2 factors while i^2 fits in a limb */
-    cap = (pbn_size)(n / 2 + 2);
-    if (PBN_B == 32 && n > 65535UL) cap = (pbn_size)(n + 2);
-    v = PBN_TMP_ALLOC(cap);
-    for (i = 2; i <= n; i++) {
-        if (cur > PBN_LIMB_MAX / (pbn_limb)i) {
-            v[cnt++] = cur;
-            cur = 1;
-        }
-        cur *= (pbn_limb)i;
-    }
-    v[cnt++] = cur;
-    pbn_prod_limbs(r, v, 0, cnt);
-    PBN_TMP_FREE(v, cap);
+    /* odd part directly, then the power of 2 (n - popcount(n)) by a shift */
+    pbn_fac_odd(r, n);
+    pbz_mul_2exp(r, r, (pbn_bitcnt)(n - pbn_popcount_ul(n)));
 }
 
 /* ---- primality ---- */
