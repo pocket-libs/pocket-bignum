@@ -719,7 +719,10 @@ static pbn_limb pbn_n_add_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_li
         pbn_limb s = ap[i] + b;
         b = s < b;
         rp[i] = s;
-        if (!b) { pbn_n_copy(rp + i + 1, ap + i + 1, n - i - 1); return 0; }
+        if (!b) {
+            if (rp != ap) for (i++; i < n; i++) rp[i] = ap[i];
+            return 0;
+        }
     }
     return b;
 }
@@ -730,7 +733,10 @@ static pbn_limb pbn_n_sub_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_li
         pbn_limb a = ap[i];
         rp[i] = a - b;
         b = a < b;
-        if (!b) { pbn_n_copy(rp + i + 1, ap + i + 1, n - i - 1); return 0; }
+        if (!b) {
+            if (rp != ap) for (i++; i < n; i++) rp[i] = ap[i];
+            return 0;
+        }
     }
     return b;
 }
@@ -930,8 +936,25 @@ static pbn_limb pbn_udiv_qrnnd(pbn_limb *r, pbn_limb n1, pbn_limb n0, pbn_limb d
 
 /* v = floor((B^2 - 1) / d) - B, d normalized */
 static pbn_limb pbn_invert_limb(pbn_limb d) {
+#if PBN_B == 64
+    /* Moller & Granlund, Algorithm 2 ("reciprocal_word"): multiplications only, since a
+       128/64 division would go through a slow runtime routine on most compilers */
+    pbn_limb d0 = d & 1, d9 = d >> 55, d40 = (d >> 24) + 1, d63 = (d >> 1) + d0;
+    pbn_limb v0 = (pbn_limb)(((uint32_t)1 << 19) - 3 * ((uint32_t)1 << 8)) / (pbn_limb)(uint32_t)d9;
+    pbn_limb v1 = (v0 << 11) - ((v0 * v0 * d40) >> 40) - 1;
+    pbn_limb v2 = (v1 << 13) + ((v1 * (((pbn_limb)1 << 60) - v1 * d40)) >> 47);
+    pbn_limb e = ((v2 >> 1) & ((pbn_limb)0 - d0)) - v2 * d63;
+    pbn_limb v3, hi, lo;
+    pbn_umul(v2, e, &hi);
+    v3 = (v2 << 31) + (hi >> 1);
+    lo = pbn_umul(v3, d, &hi);
+    lo += d;
+    hi += lo < d;
+    return v3 - hi - d;
+#else
     pbn_limb r;
     return pbn_udiv_qrnnd(&r, ~d, PBN_LIMB_MAX, d);
+#endif
 }
 
 /* (nh, nl) / d with precomputed inverse; nh < d, d normalized */
@@ -1788,6 +1811,10 @@ PBN_DEF size_t pbz_sizeinbase(pbz_srcptr x, int base) {
 }
 
 static const char pbn_digits_lower[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+static const char pbn_digit_pairs[] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
 static const char pbn_digits_upper[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 static const char pbn_digits_62[]    = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -1856,7 +1883,13 @@ static void pbn_get_str_rec(char *out, size_t nd, pbn_limb *np, pbn_size nn, con
             pbn_limb r = pbn_n_divrem_1(np, np, nn, bb);
             PBN_NORM(np, nn);
             if (base == 10) {
-                for (j = 0; j < k && pos > 0; j++) { out[--pos] = (char)('0' + r % 10); r /= 10; }
+                for (j = 0; j + 2 <= k && pos >= 2; j += 2) {
+                    unsigned d2 = (unsigned)(r % 100) * 2;
+                    r /= 100;
+                    out[--pos] = pbn_digit_pairs[d2 + 1];
+                    out[--pos] = pbn_digit_pairs[d2];
+                }
+                for (; j < k && pos > 0; j++) { out[--pos] = (char)('0' + r % 10); r /= 10; }
             } else {
                 for (j = 0; j < k && pos > 0; j++) { out[--pos] = digs[r % (pbn_limb)base]; r /= (pbn_limb)base; }
             }
@@ -1970,11 +2003,48 @@ PBN_DEF char *pbz_get_str(char *str, int base, pbz_srcptr x) {
 
     if (n == 0) {
         s[len++] = '0';
+    } else if (base == 10 && n >= 2 && n <= 3) {
+        /* small numbers: chunks of k digits, written backwards into a local buffer */
+        char tmp[3 * 20 + 4];
+        pbn_limb t3[3];
+        pbn_size tn = n;
+        int k, j;
+        pbn_limb bb = pbn_big_base(10, &k);
+        size_t pos = sizeof tmp;
+        pbn_n_copy(t3, PTR(x), n);
+        while (tn > 0) {
+            pbn_limb r = tn == 1 ? t3[0] % bb : pbn_n_divrem_1(t3, t3, tn, bb);
+            if (tn == 1) t3[0] /= bb;
+            PBN_NORM(t3, tn);
+            for (j = 0; j + 2 <= k && (tn > 0 || r >= 10); j += 2) {
+                unsigned d2 = (unsigned)(r % 100) * 2;
+                r /= 100;
+                tmp[--pos] = pbn_digit_pairs[d2 + 1];
+                tmp[--pos] = pbn_digit_pairs[d2];
+            }
+            for (; j < k && (tn > 0 || r > 0); j++) { tmp[--pos] = (char)('0' + r % 10); r /= 10; }
+        }
+        memcpy(s + len, tmp + pos, sizeof tmp - pos);
+        len += sizeof tmp - pos;
     } else if (n == 1 && base == 10) {
+        /* one limb: two digits per step (constant divisors only), written backwards */
+        char tmp[20];
+        size_t pos = sizeof tmp;
         pbn_limb v = PTR(x)[0];
-        size_t a = len, b2;
-        while (v) { s[len++] = (char)('0' + v % 10); v /= 10; }
-        for (b2 = len - 1; a < b2; a++, b2--) { char c = s[a]; s[a] = s[b2]; s[b2] = c; }
+        while (v >= 100) {
+            unsigned d2 = (unsigned)(v % 100) * 2;
+            v /= 100;
+            tmp[--pos] = pbn_digit_pairs[d2 + 1];
+            tmp[--pos] = pbn_digit_pairs[d2];
+        }
+        if (v >= 10) {
+            tmp[--pos] = pbn_digit_pairs[2 * v + 1];
+            tmp[--pos] = pbn_digit_pairs[2 * v];
+        } else {
+            tmp[--pos] = (char)('0' + v);
+        }
+        memcpy(s + len, tmp + pos, sizeof tmp - pos);
+        len += sizeof tmp - pos;
     } else if ((lg = pbn_log2_exact(base)) != 0) {
         pbn_bitcnt bits = pbz_bitlen(x);
         pbn_bitcnt nd = (bits + (pbn_bitcnt)lg - 1) / (pbn_bitcnt)lg, i;
@@ -2019,7 +2089,7 @@ static int pbn_digit_value(int c, int base) {
 
 PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
     const unsigned char *p = (const unsigned char *)str;
-    unsigned char *dv;
+    unsigned char *dv, dvbuf[256];
     size_t nd = 0, cap, i;
     int c, neg = 0;
     pbn_size rn, an;
@@ -2044,11 +2114,11 @@ PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
     if (c == 0) { SIZ(x) = 0; return 0; }
 
     cap = strlen((const char *)p - 1);
-    dv = (unsigned char *)pbn_alloc_fn(cap + 1);
+    dv = cap + 1 <= sizeof dvbuf ? dvbuf : (unsigned char *)pbn_alloc_fn(cap + 1);
     for (i = 0; i < cap; i++) {
         if (!pbn_isspace(c)) {
             int d = pbn_digit_value(c, base);
-            if (d >= base) { pbn_free_fn(dv, cap + 1); return -1; }
+            if (d >= base) { if (dv != dvbuf) pbn_free_fn(dv, cap + 1); return -1; }
             dv[nd++] = (unsigned char)d;
         }
         c = *p++;
@@ -2080,7 +2150,7 @@ PBN_DEF int pbz_set_str(pbz_ptr x, const char *str, int base) {
             pbn_powtab_clear(&t);
         }
     }
-    pbn_free_fn(dv, cap + 1);
+    if (dv != dvbuf) pbn_free_fn(dv, cap + 1);
     PBN_NORM(rp, an);
     SIZ(x) = (int)(neg ? -an : an);
     return 0;
@@ -2126,9 +2196,63 @@ static void pbz_addsub(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int bneg) {
 
 PBN_DEF void pbz_add(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_addsub(r, a, b, 0); }
 PBN_DEF void pbz_sub(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_addsub(r, a, b, 1); }
-PBN_DEF void pbz_add_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 0); }
-PBN_DEF void pbz_sub_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 1); }
-PBN_DEF void pbz_ui_sub(pbz_ptr r, unsigned long a, pbz_srcptr b) { PBZ_TMP_UL(t, a); pbz_addsub(r, t, b, 1); }
+/* r = a + b (bneg: a - b) for a single limb b */
+static void pbz_add_limb(pbz_ptr r, pbz_srcptr a, pbn_limb b, int bneg) {
+    pbn_size as = SIZ(a), an = PBN_ABS(as), rn;
+    pbn_limb *rp;
+    if (an == 0) {
+        if (b == 0) { SIZ(r) = 0; return; }
+        rp = PBZ_GROW(r, 1);
+        rp[0] = b;
+        SIZ(r) = bneg ? -1 : 1;
+        return;
+    }
+    if ((as < 0) == bneg) {
+        /* same signs: |r| = |a| + b */
+        rp = PBZ_GROW(r, an + 1);
+        rp[an] = pbn_n_add_1(rp, PTR(a), an, b);
+        rn = an + (rp[an] != 0);
+        SIZ(r) = (int)(as < 0 ? -rn : rn);
+    } else if (an == 1 && PTR(a)[0] < b) {
+        /* |a| < b: the sign flips */
+        pbn_limb v = b - PTR(a)[0];
+        rp = PBZ_GROW(r, 1);
+        rp[0] = v;
+        SIZ(r) = as < 0 ? 1 : -1;
+    } else {
+        rp = PBZ_GROW(r, an);
+        pbn_n_sub_1(rp, PTR(a), an, b);
+        rn = an;
+        PBN_NORM(rp, rn);
+        SIZ(r) = (int)(as < 0 ? -rn : rn);
+    }
+}
+
+/* r = a * b for a single limb b (neg: the product's sign flips) */
+static void pbz_mul_limb(pbz_ptr r, pbz_srcptr a, pbn_limb b, int neg) {
+    pbn_size as = SIZ(a), an = PBN_ABS(as), rn;
+    pbn_limb *rp;
+    if (an == 0 || b == 0) { SIZ(r) = 0; return; }
+    rp = PBZ_GROW(r, an + 1);
+    rp[an] = pbn_n_mul_1(rp, PTR(a), an, b);
+    rn = an + (rp[an] != 0);
+    SIZ(r) = (int)(((as < 0) != neg) ? -rn : rn);
+}
+
+#define PBN_UL_FITS_LIMB(u) ((unsigned long)(pbn_limb)(u) == (u))
+
+PBN_DEF void pbz_add_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_add_limb(r, a, (pbn_limb)b, 0); return; }
+    { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 0); }
+}
+PBN_DEF void pbz_sub_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_add_limb(r, a, (pbn_limb)b, 1); return; }
+    { PBZ_TMP_UL(t, b); pbz_addsub(r, a, t, 1); }
+}
+PBN_DEF void pbz_ui_sub(pbz_ptr r, unsigned long a, pbz_srcptr b) {
+    if (PBN_UL_FITS_LIMB(a)) { pbz_add_limb(r, b, (pbn_limb)a, 1); SIZ(r) = -SIZ(r); return; }
+    { PBZ_TMP_UL(t, a); pbz_addsub(r, t, b, 1); }
+}
 
 PBN_DEF void pbz_neg(pbz_ptr r, pbz_srcptr a) { pbz_set(r, a); SIZ(r) = -SIZ(r); }
 PBN_DEF void pbz_abs(pbz_ptr r, pbz_srcptr a) { pbz_set(r, a); SIZ(r) = PBN_ABS(SIZ(r)); }
@@ -2145,6 +2269,28 @@ PBN_DEF void pbz_mul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
         pbz_srcptr t = a; a = b; b = t;
         rn = an; an = bn; bn = rn;
     }
+#if defined(PBN_HAVE_DLIMB)
+    if (an == 2 && bn == 2) {
+        /* inline 2x2 (operands read first: r may alias a or b) */
+        pbn_limb a0 = PTR(a)[0], a1 = PTR(a)[1], b0 = PTR(b)[0], b1 = PTR(b)[1], r1, r2, h;
+        pbn_dlimb t;
+        rp = PBZ_GROW(r, 4);
+        t = (pbn_dlimb)a0 * b0;
+        rp[0] = (pbn_limb)t;
+        t = (pbn_dlimb)a0 * b1 + (pbn_limb)(t >> PBN_B);
+        r1 = (pbn_limb)t;
+        r2 = (pbn_limb)(t >> PBN_B);
+        t = (pbn_dlimb)a1 * b0 + r1;
+        rp[1] = (pbn_limb)t;
+        h = (pbn_limb)(t >> PBN_B);
+        t = (pbn_dlimb)a1 * b1 + r2 + h;
+        rp[2] = (pbn_limb)t;
+        rp[3] = (pbn_limb)(t >> PBN_B);
+        rn = 4 - (rp[3] == 0);
+        SIZ(r) = (int)(neg ? -rn : rn);
+        return;
+    }
+#endif
     if (bn == 1) {
         pbn_limb b0 = PTR(b)[0], cy;
         rp = PBZ_GROW(r, an + 1);
@@ -2176,14 +2322,27 @@ PBN_DEF void pbz_mul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
     SIZ(r) = (int)(neg ? -rn : rn);
 }
 
-PBN_DEF void pbz_mul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_mul(r, a, t); }
-PBN_DEF void pbz_mul_si(pbz_ptr r, pbz_srcptr a, long b)          { PBZ_TMP_SL(t, b); pbz_mul(r, a, t); }
+PBN_DEF void pbz_mul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) {
+    if (PBN_UL_FITS_LIMB(b)) { pbz_mul_limb(r, a, (pbn_limb)b, 0); return; }
+    { PBZ_TMP_UL(t, b); pbz_mul(r, a, t); }
+}
+PBN_DEF void pbz_mul_si(pbz_ptr r, pbz_srcptr a, long b) {
+    unsigned long m = b < 0 ? 0UL - (unsigned long)b : (unsigned long)b;
+    if (PBN_UL_FITS_LIMB(m)) { pbz_mul_limb(r, a, (pbn_limb)m, b < 0); return; }
+    { PBZ_TMP_SL(t, b); pbz_mul(r, a, t); }
+}
 
 PBN_DEF void pbz_addmul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
-    pbz_t t; pbz_init(t); pbz_mul(t, a, b); pbz_add(r, r, t); pbz_clear(t);
+    PBZ_STACK(t, 16);
+    pbz_mul(t, a, b);
+    pbz_add(r, r, t);
+    pbz_clear(t);
 }
 PBN_DEF void pbz_submul(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) {
-    pbz_t t; pbz_init(t); pbz_mul(t, a, b); pbz_sub(r, r, t); pbz_clear(t);
+    PBZ_STACK(t, 16);
+    pbz_mul(t, a, b);
+    pbz_sub(r, r, t);
+    pbz_clear(t);
 }
 PBN_DEF void pbz_addmul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_addmul(r, a, t); }
 PBN_DEF void pbz_submul_ui(pbz_ptr r, pbz_srcptr a, unsigned long b) { PBZ_TMP_UL(t, b); pbz_submul(r, a, t); }
@@ -2467,9 +2626,41 @@ static void pbn_tc(pbn_limb *rp, pbz_srcptr x, pbn_size n) {
 }
 
 static void pbz_bitop(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int op) {
-    pbn_size an = PBN_ABS(SIZ(a)), bn = PBN_ABS(SIZ(b)), n = PBN_MAX(an, bn) + 1, i;
+    pbn_size an = PBN_ABS(SIZ(a)), bn = PBN_ABS(SIZ(b)), n, i, total;
     int aneg = SIZ(a) < 0, bneg = SIZ(b) < 0, rneg;
-    pbn_limb *tp = PBN_TMP_ALLOC(2 * n), *ta = tp, *tb = tp + n;
+    pbn_limb *tp, *ta, *tb, *rp;
+    PBN_TMP_DECL(tbuf);
+
+    if (!aneg && !bneg) {
+        /* both non-negative: no two's complement needed */
+        const pbn_limb *ap, *bp;
+        if (an < bn) {
+            pbz_srcptr x = a; a = b; b = x;
+            n = an; an = bn; bn = n;
+        }
+        if (op == PBN_AND) {
+            rp = PBZ_GROW(r, bn);
+            ap = PTR(a); bp = PTR(b);
+            for (i = 0; i < bn; i++) rp[i] = ap[i] & bp[i];
+            n = bn;
+        } else {
+            rp = PBZ_GROW(r, an);
+            ap = PTR(a); bp = PTR(b);
+            if (op == PBN_IOR) for (i = 0; i < bn; i++) rp[i] = ap[i] | bp[i];
+            else               for (i = 0; i < bn; i++) rp[i] = ap[i] ^ bp[i];
+            pbn_n_copy(rp + bn, ap + bn, an - bn);
+            n = an;
+        }
+        PBN_NORM(rp, n);
+        SIZ(r) = (int)n;
+        return;
+    }
+
+    n = PBN_MAX(an, bn) + 1;
+    total = 2 * n;
+    tp = PBN_TMP_GET(tbuf, total);
+    ta = tp;
+    tb = tp + n;
     rneg = op == PBN_AND ? (aneg & bneg) : op == PBN_IOR ? (aneg | bneg) : (aneg ^ bneg);
     pbn_tc(ta, a, n);
     pbn_tc(tb, b, n);
@@ -2480,8 +2671,10 @@ static void pbz_bitop(pbz_ptr r, pbz_srcptr a, pbz_srcptr b, int op) {
     }
     if (rneg) pbn_n_neg(ta, ta, n);
     PBN_NORM(ta, n);
-    pbz_install(r, tp, 2 * PBN_MAX(an, bn) + 2);
+    rp = PBZ_GROW(r, n);
+    pbn_n_copy(rp, ta, n);
     SIZ(r) = (int)(rneg ? -n : n);
+    PBN_TMP_PUT(tbuf, tp, total);
 }
 
 PBN_DEF void pbz_and(pbz_ptr r, pbz_srcptr a, pbz_srcptr b) { pbz_bitop(r, a, b, PBN_AND); }
@@ -2536,19 +2729,84 @@ PBN_DEF void pbz_combit(pbz_ptr a, pbn_bitcnt k) { pbz_addbit(a, k, pbz_tstbit(a
 /* ---- powers ---- */
 
 PBN_DEF void pbz_pow_ui(pbz_ptr r, pbz_srcptr b, unsigned long e) {
-    pbz_t base;
-    int i;
+    pbn_size bs = SIZ(b), bn = PBN_ABS(bs), zl = 0, on, pn, tn, cap, total, rn, sl;
+    pbn_bitcnt tz, ob, shift;
+    pbn_limb *buf, *op, *p, *t, *rp;
+    unsigned sb;
+    int neg = bs < 0 && (e & 1), i;
+    PBN_TMP_DECL(pb);
+
     if (e == 0) { pbz_set_ui(r, 1); return; }
-    if (SIZ(b) == 0) { SIZ(r) = 0; return; }
-    pbz_init_set(base, b);
-    pbz_set(r, base);
-    for (i = (int)(sizeof(unsigned long) * CHAR_BIT) - 1; i >= 0; i--)
-        if ((e >> i) & 1) break;
-    for (i--; i >= 0; i--) {
-        pbz_mul(r, r, r);
-        if ((e >> i) & 1) pbz_mul(r, r, base);
+    if (bn == 0) { SIZ(r) = 0; return; }
+
+    /* b = o * 2^tz with o odd: b^e = o^e * 2^(tz e) */
+    while (PTR(b)[zl] == 0) zl++;
+    tz = (pbn_bitcnt)zl * PBN_B + (pbn_bitcnt)pbn_ctz(PTR(b)[zl]);
+    on = bn - zl;
+#define PBN_BITCNT_HALF ((pbn_bitcnt)~(pbn_bitcnt)0 >> (sizeof(pbn_bitcnt) * CHAR_BIT / 2))
+    /* overflow checks: a division only when the operands aren't small */
+    if ((tz | (pbn_bitcnt)e) > PBN_BITCNT_HALF && tz && e > (~(pbn_bitcnt)0) / tz) PBN_ABORT("number too large");
+    shift = tz * (pbn_bitcnt)e;
+
+    /* o^e has at most ob * e bits */
+    {
+        pbn_limb top = PTR(b)[bn - 1];
+        ob = (pbn_bitcnt)(bn - 1) * PBN_B + (pbn_bitcnt)(PBN_B - pbn_clz(top)) - tz;
     }
-    pbz_clear(base);
+    if ((ob | (pbn_bitcnt)e) > PBN_BITCNT_HALF / 4 && e > (~(pbn_bitcnt)0 - 2 * PBN_B) / ob) PBN_ABORT("number too large");
+    cap = (pbn_size)(ob * (pbn_bitcnt)e / PBN_B) + 2;
+    total = on + 2 * cap;
+    buf = PBN_TMP_GET(pb, total);
+    op = buf;
+    p = op + on;
+    t = p + cap;
+
+    if (tz % PBN_B) pbn_n_rshift(op, PTR(b) + zl, on, (unsigned)(tz % PBN_B));
+    else            pbn_n_copy(op, PTR(b) + zl, on);
+    PBN_NORM(op, on);
+
+    /* o^e, left to right */
+    pbn_n_copy(p, op, on);
+    pn = on;
+    if (!(on == 1 && op[0] == 1)) {
+        for (i = 0; (e >> i) > 1; i++) ;          /* i = index of the top bit */
+        for (i--; i >= 0; i--) {
+            pbn_limb *x;
+            if (pn == 1) {
+                pbn_limb hi;
+                p[0] = pbn_umul(p[0], p[0], &hi);
+                if (hi) p[pn++] = hi;
+            } else {
+                pbn_n_sqr(t, p, pn);
+                tn = 2 * pn;
+                PBN_NORM(t, tn);
+                x = p; p = t; t = x; pn = tn;
+            }
+            if ((e >> i) & 1) {
+                if (on == 1) {
+                    pbn_limb cy = pbn_n_mul_1(p, p, pn, op[0]);
+                    if (cy) p[pn++] = cy;
+                } else {
+                    pbn_n_mul(t, p, pn, op, on);
+                    tn = pn + on;
+                    PBN_NORM(t, tn);
+                    x = p; p = t; t = x; pn = tn;
+                }
+            }
+        }
+    }
+
+    /* r = o^e * 2^(tz e) */
+    sl = (pbn_size)(shift / PBN_B);
+    sb = (unsigned)(shift % PBN_B);
+    rn = pn + sl + 1;
+    rp = PBZ_GROW(r, rn);
+    if (sb) rp[pn + sl] = pbn_n_lshift(rp + sl, p, pn, sb);
+    else { pbn_n_copy(rp + sl, p, pn); rp[pn + sl] = 0; }
+    pbn_n_zero(rp, sl);
+    PBN_NORM(rp, rn);
+    SIZ(r) = (int)(neg ? -rn : rn);
+    PBN_TMP_PUT(pb, buf, total);
 }
 
 PBN_DEF void pbz_ui_pow_ui(pbz_ptr r, unsigned long b, unsigned long e) {
@@ -2925,11 +3183,15 @@ static pbn_limb pbn_gcd_limb(pbn_limb a, pbn_limb b) {
     if (!b) return a;
     s = pbn_ctz(a | b);
     a >>= pbn_ctz(a);
-    do {
-        b >>= pbn_ctz(b);
-        if (a > b) { pbn_limb t = a; a = b; b = t; }
-        b -= a;
-    } while (b);
+    b >>= pbn_ctz(b);
+    /* both odd: (a, b) <- (min, |a - b| >> ctz); ctz(a - b) == ctz(|a - b|), so the count
+       doesn't wait for the min/abs selection */
+    while (a != b) {
+        pbn_limb d = a - b, lo = a < b ? a : b;
+        int z = pbn_ctz(d);
+        b = (a < b ? b - a : d) >> z;
+        a = lo;
+    }
     return a << s;
 }
 
@@ -3056,13 +3318,20 @@ PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
         int sh = 0;
         if (an == 2) u |= (pbn_dlimb)PTR(a)[1] << PBN_B;
         if (bn == 2) v |= (pbn_dlimb)PTR(b)[1] << PBN_B;
-        while (!((u | v) & 1)) { u >>= 1; v >>= 1; sh++; }
-        while (!(u & 1)) u >>= 1;
-        do {
-            while (!(v & 1)) v >>= 1;
-            if (u > v) { pbn_dlimb t = u; u = v; v = t; }
-            v -= u;
-        } while (v);
+#define PBN_CTZ_D(x) ((pbn_limb)(x) ? pbn_ctz((pbn_limb)(x)) : PBN_B + pbn_ctz((pbn_limb)((x) >> PBN_B)))
+        {
+            int su = PBN_CTZ_D(u), sv = PBN_CTZ_D(v);
+            sh = su < sv ? su : sv;
+            u >>= su;
+            v >>= sv;
+        }
+        /* 2-limb steps only while one of them doesn't fit in a limb */
+        while ((u >> PBN_B) | (v >> PBN_B)) {
+            if (u > v) { u -= v; u >>= PBN_CTZ_D(u); }
+            else if (v > u) { v -= u; v >>= PBN_CTZ_D(v); }
+            else break;
+        }
+        if (!((u >> PBN_B) | (v >> PBN_B))) u = pbn_gcd_limb((pbn_limb)u, (pbn_limb)v);
         u <<= sh;
         gp = PBZ_GROW(g, 2);
         gp[0] = (pbn_limb)u;

@@ -14,7 +14,7 @@ SMALLTHR = -DPBN_MUL_KARA_THRESHOLD=2 -DPBN_SQR_KARA_THRESHOLD=2 -DPBN_MUL_TOOM3
 
 BUILD = build
 
-.PHONY: all test test64 test32 testportable testqf testcompat testthresholds arturo-check bench bench-ruby clean
+.PHONY: all test test64 test32 testportable testqf testcompat testthresholds arturo-check bench bench-ruby bench-small clean
 
 all: test
 
@@ -46,6 +46,9 @@ $(BUILD)/fuzzqfthr: tests/fuzz_qf.c pocketbignum.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) $(SMALLTHR) $(GMPINC) $< -o $@ $(MPFRLIB) -lm
 
 $(BUILD)/bench_ops: tests/bench_ops.c pocketbignum.h | $(BUILD)
+	$(CC) -O3 -std=c99 -DNDEBUG $< -o $@ -lm
+
+$(BUILD)/bench_small: tests/bench_small.c pocketbignum.h | $(BUILD)
 	$(CC) -O3 -std=c99 -DNDEBUG $< -o $@ -lm
 
 $(BUILD)/bench: tests/bench.c pocketbignum.h | $(BUILD)
@@ -86,6 +89,10 @@ arturo-check:
 bench: $(BUILD)/bench $(BUILD)/bench_qf
 	./$(BUILD)/bench
 	./$(BUILD)/bench_qf
+
+# small numbers, the way Arturo uses them
+bench-small: $(BUILD)/bench_small
+	./$(BUILD)/bench_small
 
 # PocketBignum vs Ruby's Integer (mul, sqr, sqrt, get_str, set_str at large sizes)
 bench-ruby: $(BUILD)/bench_ops
