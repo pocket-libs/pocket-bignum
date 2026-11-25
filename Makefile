@@ -72,6 +72,13 @@ test32: $(BUILD)/fuzz32
 testportable: $(BUILD)/fuzzportable
 	./$(BUILD)/fuzzportable $(ITERS) $(SEED)
 
+# pbi (small-or-big integers, experimental) vs pbz
+$(BUILD)/pbi: tests/pbi.c pocketbignum.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) $< -o $@ -lm
+
+testpbi: $(BUILD)/pbi
+	./$(BUILD)/pbi $(ITERS)0 $(SEED)
+
 testcompat: $(BUILD)/compat
 	./$(BUILD)/compat
 
