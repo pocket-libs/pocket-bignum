@@ -1937,93 +1937,175 @@ static pbn_limb pbn_ntt_powmod(const pbn_ntt_mod *m, pbn_limb b, pbn_limb e) {
     return r;
 }
 
-/* tw[h + j] = w_{2h}^j (Montgomery form) for every stage h = 1, 2, ..., L/2 and j < h,
-   w the L-th root of unity given (plain) */
-static void pbn_ntt_twiddles(pbn_limb *tw, pbn_size L, pbn_limb w, const pbn_ntt_mod *m) {
-    pbn_size h = L / 2, j;
-    pbn_limb wm = pbn_ntt_mulmod(m, w, m->r1);
-    tw[h] = m->r1;
-    for (j = 1; j < h; j++) tw[h + j] = pbn_ntt_mont(tw[h + j - 1], wm, m->p, m->ni);
-    for (h >>= 1; h >= 1; h >>= 1)
-        for (j = 0; j < h; j++) tw[h + j] = tw[2 * h + 2 * j];
+/* Shoup's multiplication by a known w < p: with ws = floor(w B / p), x w mod p for any x,
+   as a value in [0, 2p) - one high product, the rest wraps around */
+PBN_INLINE pbn_limb pbn_ntt_shoup(pbn_limb x, pbn_limb w, pbn_limb ws, pbn_limb p) {
+    pbn_limb q;
+    pbn_umul(x, ws, &q);
+    return x * w - q * p;
 }
 
-/* forward transform (decimation in frequency: natural order in, bit-reversed out) */
-static void pbn_ntt_fwd(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_ntt_mod *m) {
-    pbn_limb p = m->p, ni = m->ni;
-    pbn_size h, s, j;
-    for (h = L / 2; h >= 1; h >>= 1)
-        for (s = 0; s < L; s += 2 * h) {
-            pbn_limb *x = a + s, *y = a + s + h;
-            const pbn_limb *t = tw + h;
-            for (j = 0; j < h; j++) {
-                pbn_limb u = x[j], v = y[j];
-                x[j] = pbn_ntt_add(u, v, p);
-                y[j] = pbn_ntt_mont(pbn_ntt_sub(u, v, p), t[j], p, ni);
-            }
+/* floor(w B / p), w < p */
+static pbn_limb pbn_ntt_shoup_const(pbn_limb w, pbn_limb p) {
+    int s = pbn_clz(p);
+    pbn_limb r, d = p << s;
+    return pbn_div_preinv(&r, w << s, 0, d, pbn_invert_limb(d));
+}
+
+/* tw[h + j] = w_{2h}^j (plain) and ts[h + j] its Shoup constant, for every stage
+   h = 1, 2, ..., L/2 and j < h; w the L-th root of unity given */
+static void pbn_ntt_twiddles(pbn_limb *tw, pbn_limb *ts, pbn_size L, pbn_limb w, const pbn_ntt_mod *m) {
+    /* powers of w in Montgomery form (wB mod p), one product each; from those, the plain
+       value is a reduction, and floor(wB / p) = (wB - (wB mod p)) / p an exact division:
+       -(wB mod p) / p mod B, with no division at all */
+    pbn_size h = L / 2, j;
+    pbn_limb p = m->p, pinv = (pbn_limb)0 - m->ni, wm = pbn_ntt_mulmod(m, w, m->r1), x = m->r1;
+    for (j = 0; j < h; j++) {
+        tw[h + j] = pbn_ntt_mont(x, 1, p, m->ni);
+        ts[h + j] = ((pbn_limb)0 - x) * pinv;
+        x = pbn_ntt_mont(x, wm, p, m->ni);
+    }
+    for (h >>= 1; h >= 1; h >>= 1)
+        for (j = 0; j < h; j++) {
+            tw[h + j] = tw[2 * h + 2 * j];
+            ts[h + j] = ts[2 * h + 2 * j];
         }
+}
+
+/* the same tables for the inverse root, from the ones of w: for the 2h-th roots,
+   w^-j = -w^(h-j), and floor((p - w) B / p) = B - 1 - floor(w B / p) (w B is never a
+   multiple of p) */
+static void pbn_ntt_twiddles_inverse(pbn_limb *iw, pbn_limb *is, const pbn_limb *tw, const pbn_limb *ts,
+                                     pbn_size L, pbn_limb p) {
+    pbn_size h, j;
+    for (h = 1; h < L; h <<= 1) {
+        iw[h] = tw[h];
+        is[h] = ts[h];
+        for (j = 1; j < h; j++) {
+            iw[h + j] = p - tw[2 * h - j];
+            is[h + j] = ~ts[2 * h - j];
+        }
+    }
+}
+
+/* Above this length, the transforms go depth-first: the first (last) stage over the whole
+   array, then each half on its own - so that the rest of the work stays in cache */
+#ifndef PBN_NTT_BLOCK
+#  define PBN_NTT_BLOCK 4096
+#endif
+
+/* The stages keep their values in [0, 2p) and never reduce them further (Harvey's
+   lazy butterflies): with p < 2^62, sums & differences up to 4p still fit in a limb */
+
+/* one decimation-in-frequency stage: butterflies h apart, over L */
+PBN_INLINE void pbn_ntt_fwd_stage(pbn_limb *a, pbn_size L, pbn_size h, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_limb p2 = 2 * p;
+    pbn_size s, j;
+    for (s = 0; s < L; s += 2 * h) {
+        pbn_limb *x = a + s, *y = a + s + h;
+        const pbn_limb *t = tw + h, *q = ts + h;
+        for (j = 0; j < h; j++) {
+            pbn_limb u = x[j], v = y[j];
+            x[j] = pbn_ntt_fix(u + v - p2, p2);
+            y[j] = pbn_ntt_shoup(u - v + p2, t[j], q[j], p);
+        }
+    }
+}
+
+/* one decimation-in-time stage */
+PBN_INLINE void pbn_ntt_inv_stage(pbn_limb *a, pbn_size L, pbn_size h, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_limb p2 = 2 * p;
+    pbn_size s, j;
+    for (s = 0; s < L; s += 2 * h) {
+        pbn_limb *x = a + s, *y = a + s + h;
+        const pbn_limb *t = tw + h, *q = ts + h;
+        for (j = 0; j < h; j++) {
+            pbn_limb u = x[j], v = pbn_ntt_shoup(y[j], t[j], q[j], p);
+            x[j] = pbn_ntt_fix(u + v - p2, p2);
+            y[j] = pbn_ntt_fix(u - v, p2);
+        }
+    }
+}
+
+/* forward transform (decimation in frequency: natural order in, bit-reversed out);
+   tw[h + j] only depends on the stage, so the halves use the same table */
+static void pbn_ntt_fwd(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_size h;
+    if (L > PBN_NTT_BLOCK) {
+        pbn_ntt_fwd_stage(a, L, L / 2, tw, ts, p);
+        pbn_ntt_fwd(a, L / 2, tw, ts, p);
+        pbn_ntt_fwd(a + L / 2, L / 2, tw, ts, p);
+        return;
+    }
+    for (h = L / 2; h >= 1; h >>= 1) pbn_ntt_fwd_stage(a, L, h, tw, ts, p);
 }
 
 /* inverse transform without the 1/L (decimation in time: bit-reversed in, natural out),
    tw built from the inverse root */
-static void pbn_ntt_inv(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_ntt_mod *m) {
-    pbn_limb p = m->p, ni = m->ni;
-    pbn_size h, s, j;
-    for (h = 1; h < L; h <<= 1)
-        for (s = 0; s < L; s += 2 * h) {
-            pbn_limb *x = a + s, *y = a + s + h;
-            const pbn_limb *t = tw + h;
-            for (j = 0; j < h; j++) {
-                pbn_limb u = x[j], v = pbn_ntt_mont(y[j], t[j], p, ni);
-                x[j] = pbn_ntt_add(u, v, p);
-                y[j] = pbn_ntt_sub(u, v, p);
-            }
-        }
+static void pbn_ntt_inv(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_size h;
+    if (L > PBN_NTT_BLOCK) {
+        pbn_ntt_inv(a, L / 2, tw, ts, p);
+        pbn_ntt_inv(a + L / 2, L / 2, tw, ts, p);
+        pbn_ntt_inv_stage(a, L, L / 2, tw, ts, p);
+        return;
+    }
+    for (h = 1; h < L; h <<= 1) pbn_ntt_inv_stage(a, L, h, tw, ts, p);
 }
 
 /* rp[0..an+bn) = a * b (sq: b is a); an, bn >= 1 */
 static void pbn_n_mul_fft(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn, int sq) {
     pbn_size cn = an + bn - 1, L = 1, k, i;
-    pbn_limb *buf, *fa, *fb, *tw, *res[3], c0 = 0, c1 = 0, c2 = 0;
+    pbn_limb *buf, *fa, *fb, *tw, *ts, *iw, *is, *res[3], c0 = 0, c1 = 0, c2 = 0;
     pbn_ntt_mod md[3];
     size_t total;
 
     while (L < cn) L <<= 1;
     if (L < 2) L = 2;
-    total = (size_t)3 * L + (size_t)3 * cn;
+    total = (size_t)6 * L + (size_t)3 * cn;
     buf = (pbn_limb *)pbn_alloc_fn(total * sizeof(pbn_limb));
     fa = buf;
     fb = fa + L;
     tw = fb + L;
-    res[0] = tw + L;
+    ts = tw + L;
+    iw = ts + L;
+    is = iw + L;
+    res[0] = is + L;
     res[1] = res[0] + cn;
     res[2] = res[1] + cn;
 
     for (k = 0; k < 3; k++) {
         const pbn_ntt_mod *m = &md[k];
-        pbn_limb p, w, scale;
+        pbn_limb p, w, one, scale, scales, x;
         pbn_ntt_mod_init(&md[k], pbn_ntt_p[k]);
         p = m->p;
         w = pbn_ntt_powmod(m, pbn_ntt_g[k], (p - 1) / (pbn_limb)L);
-        pbn_ntt_twiddles(tw, L, w, m);
+        pbn_ntt_twiddles(tw, ts, L, w, m);
 
-        /* inputs in Montgomery form (this also reduces each limb mod p) */
-        for (i = 0; i < an; i++) fa[i] = pbn_ntt_mont(ap[i], m->r2, p, m->ni);
+        /* the inputs, reduced into [0, 2p) (a Shoup product by 1) */
+        one = pbn_ntt_shoup_const(1, p);
+        for (i = 0; i < an; i++) fa[i] = pbn_ntt_shoup(ap[i], 1, one, p);
         for (; i < L; i++) fa[i] = 0;
-        pbn_ntt_fwd(fa, L, tw, m);
+        pbn_ntt_fwd(fa, L, tw, ts, p);
+        /* pointwise: Montgomery products (inputs < 2p < B / 2: results < p), each with an
+           extra 1/B, taken back below */
         if (sq) {
             for (i = 0; i < L; i++) fa[i] = pbn_ntt_mont(fa[i], fa[i], p, m->ni);
         } else {
-            for (i = 0; i < bn; i++) fb[i] = pbn_ntt_mont(bp[i], m->r2, p, m->ni);
+            for (i = 0; i < bn; i++) fb[i] = pbn_ntt_shoup(bp[i], 1, one, p);
             for (; i < L; i++) fb[i] = 0;
-            pbn_ntt_fwd(fb, L, tw, m);
+            pbn_ntt_fwd(fb, L, tw, ts, p);
             for (i = 0; i < L; i++) fa[i] = pbn_ntt_mont(fa[i], fb[i], p, m->ni);
         }
-        /* inverse: twiddles from the inverse root; then 1/L (and the Montgomery factor) */
-        pbn_ntt_twiddles(tw, L, pbn_ntt_powmod(m, w, p - 2), m);
-        pbn_ntt_inv(fa, L, tw, m);
-        scale = pbn_ntt_powmod(m, (pbn_limb)L % p, p - 2);          /* 1/L, plain */
-        for (i = 0; i < cn; i++) res[k][i] = pbn_ntt_mont(fa[i], scale, p, m->ni);
+        /* inverse: twiddles of the inverse root; then B / L (both factors at once) */
+        pbn_ntt_twiddles_inverse(iw, is, tw, ts, L, p);
+        pbn_ntt_inv(fa, L, iw, is, p);
+        scale = pbn_ntt_mulmod(m, m->r1, pbn_ntt_powmod(m, (pbn_limb)L % p, p - 2));
+        scales = pbn_ntt_shoup_const(scale, p);
+        for (i = 0; i < cn; i++) {
+            x = pbn_ntt_shoup(fa[i], scale, scales, p);
+            res[k][i] = x >= p ? x - p : x;
+        }
     }
 
     /* Garner: x = v1 + p1 v2 + p1 p2 v3, then carried into rp */
