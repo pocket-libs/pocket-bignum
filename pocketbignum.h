@@ -1878,7 +1878,199 @@ static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *
         pbn_n_kara_sqr(rp, ap, n, tp);
 }
 
+/* ---- FFT multiplication (64-bit limbs): number-theoretic transforms modulo three primes
+        p = c 2^k + 1 < 2^62, one limb per coefficient; every coefficient of the product is
+        below n 2^128 < p1 p2 p3 (~2^184), so the Chinese remainder theorem recovers it ---- */
+
+#if PBN_B == 64 && !defined(PBN_NO_FFT)
+#  define PBN_HAVE_FFT 1
+#  ifndef PBN_MUL_FFT_THRESHOLD
+#    define PBN_MUL_FFT_THRESHOLD 7000     /* limbs of the smaller operand */
+#  endif
+#  ifndef PBN_SQR_FFT_THRESHOLD
+#    define PBN_SQR_FFT_THRESHOLD 7000
+#  endif
+
+static const pbn_limb pbn_ntt_p[3] = { 4179340454199820289u, 2485986994308513793u, 1945555039024054273u };
+static const pbn_limb pbn_ntt_g[3] = { 3, 5, 5 };   /* primitive roots: 29 2^57 + 1, 69 2^55 + 1, 27 2^56 + 1 */
+
+/* branch-free reductions (values < 2^62: x - p is negative exactly when its top bit is set);
+   data-dependent branches here would be mispredicted half the time */
+PBN_INLINE pbn_limb pbn_ntt_fix(pbn_limb x, pbn_limb p) { return x + (p & ((pbn_limb)0 - (x >> 63))); }
+PBN_INLINE pbn_limb pbn_ntt_add(pbn_limb a, pbn_limb b, pbn_limb p) { return pbn_ntt_fix(a + b - p, p); }
+PBN_INLINE pbn_limb pbn_ntt_sub(pbn_limb a, pbn_limb b, pbn_limb p) { return pbn_ntt_fix(a - b, p); }
+
+/* Montgomery product a b / B mod p (a < B, b < p; ni = -1/p mod B) */
+PBN_INLINE pbn_limb pbn_ntt_mont(pbn_limb a, pbn_limb b, pbn_limb p, pbn_limb ni) {
+    pbn_limb hi, lo = pbn_umul(a, b, &hi), h2, r;
+    pbn_umul(lo * ni, p, &h2);
+    r = hi + h2 + (lo != 0);       /* (ab + mp) / B: the low halves add up to 0 or B */
+    return pbn_ntt_fix(r - p, p);
+}
+
+typedef struct { pbn_limb p, ni, r1, r2; } pbn_ntt_mod;   /* r1 = B mod p, r2 = B^2 mod p */
+
+static void pbn_ntt_mod_init(pbn_ntt_mod *m, pbn_limb p) {
+    pbn_limb ni = p, r;     /* p^-1 mod B by Newton, then negated */
+    int i;
+    for (i = 0; i < 6; i++) ni *= 2 - p * ni;
+    m->p = p;
+    m->ni = (pbn_limb)0 - ni;
+    r = ((pbn_limb)0 - p) % p;     /* B mod p */
+    m->r1 = r;
+    for (i = 0; i < 64; i++) r = pbn_ntt_add(r, r, p);
+    m->r2 = r;
+}
+
+/* a b mod p (plain residues) */
+PBN_INLINE pbn_limb pbn_ntt_mulmod(const pbn_ntt_mod *m, pbn_limb a, pbn_limb b) {
+    return pbn_ntt_mont(pbn_ntt_mont(a, b, m->p, m->ni), m->r2, m->p, m->ni);
+}
+
+static pbn_limb pbn_ntt_powmod(const pbn_ntt_mod *m, pbn_limb b, pbn_limb e) {
+    pbn_limb r = 1;
+    while (e) {
+        if (e & 1) r = pbn_ntt_mulmod(m, r, b);
+        b = pbn_ntt_mulmod(m, b, b);
+        e >>= 1;
+    }
+    return r;
+}
+
+/* tw[h + j] = w_{2h}^j (Montgomery form) for every stage h = 1, 2, ..., L/2 and j < h,
+   w the L-th root of unity given (plain) */
+static void pbn_ntt_twiddles(pbn_limb *tw, pbn_size L, pbn_limb w, const pbn_ntt_mod *m) {
+    pbn_size h = L / 2, j;
+    pbn_limb wm = pbn_ntt_mulmod(m, w, m->r1);
+    tw[h] = m->r1;
+    for (j = 1; j < h; j++) tw[h + j] = pbn_ntt_mont(tw[h + j - 1], wm, m->p, m->ni);
+    for (h >>= 1; h >= 1; h >>= 1)
+        for (j = 0; j < h; j++) tw[h + j] = tw[2 * h + 2 * j];
+}
+
+/* forward transform (decimation in frequency: natural order in, bit-reversed out) */
+static void pbn_ntt_fwd(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_ntt_mod *m) {
+    pbn_limb p = m->p, ni = m->ni;
+    pbn_size h, s, j;
+    for (h = L / 2; h >= 1; h >>= 1)
+        for (s = 0; s < L; s += 2 * h) {
+            pbn_limb *x = a + s, *y = a + s + h;
+            const pbn_limb *t = tw + h;
+            for (j = 0; j < h; j++) {
+                pbn_limb u = x[j], v = y[j];
+                x[j] = pbn_ntt_add(u, v, p);
+                y[j] = pbn_ntt_mont(pbn_ntt_sub(u, v, p), t[j], p, ni);
+            }
+        }
+}
+
+/* inverse transform without the 1/L (decimation in time: bit-reversed in, natural out),
+   tw built from the inverse root */
+static void pbn_ntt_inv(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_ntt_mod *m) {
+    pbn_limb p = m->p, ni = m->ni;
+    pbn_size h, s, j;
+    for (h = 1; h < L; h <<= 1)
+        for (s = 0; s < L; s += 2 * h) {
+            pbn_limb *x = a + s, *y = a + s + h;
+            const pbn_limb *t = tw + h;
+            for (j = 0; j < h; j++) {
+                pbn_limb u = x[j], v = pbn_ntt_mont(y[j], t[j], p, ni);
+                x[j] = pbn_ntt_add(u, v, p);
+                y[j] = pbn_ntt_sub(u, v, p);
+            }
+        }
+}
+
+/* rp[0..an+bn) = a * b (sq: b is a); an, bn >= 1 */
+static void pbn_n_mul_fft(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn, int sq) {
+    pbn_size cn = an + bn - 1, L = 1, k, i;
+    pbn_limb *buf, *fa, *fb, *tw, *res[3], c0 = 0, c1 = 0, c2 = 0;
+    pbn_ntt_mod md[3];
+    size_t total;
+
+    while (L < cn) L <<= 1;
+    if (L < 2) L = 2;
+    total = (size_t)3 * L + (size_t)3 * cn;
+    buf = (pbn_limb *)pbn_alloc_fn(total * sizeof(pbn_limb));
+    fa = buf;
+    fb = fa + L;
+    tw = fb + L;
+    res[0] = tw + L;
+    res[1] = res[0] + cn;
+    res[2] = res[1] + cn;
+
+    for (k = 0; k < 3; k++) {
+        const pbn_ntt_mod *m = &md[k];
+        pbn_limb p, w, scale;
+        pbn_ntt_mod_init(&md[k], pbn_ntt_p[k]);
+        p = m->p;
+        w = pbn_ntt_powmod(m, pbn_ntt_g[k], (p - 1) / (pbn_limb)L);
+        pbn_ntt_twiddles(tw, L, w, m);
+
+        /* inputs in Montgomery form (this also reduces each limb mod p) */
+        for (i = 0; i < an; i++) fa[i] = pbn_ntt_mont(ap[i], m->r2, p, m->ni);
+        for (; i < L; i++) fa[i] = 0;
+        pbn_ntt_fwd(fa, L, tw, m);
+        if (sq) {
+            for (i = 0; i < L; i++) fa[i] = pbn_ntt_mont(fa[i], fa[i], p, m->ni);
+        } else {
+            for (i = 0; i < bn; i++) fb[i] = pbn_ntt_mont(bp[i], m->r2, p, m->ni);
+            for (; i < L; i++) fb[i] = 0;
+            pbn_ntt_fwd(fb, L, tw, m);
+            for (i = 0; i < L; i++) fa[i] = pbn_ntt_mont(fa[i], fb[i], p, m->ni);
+        }
+        /* inverse: twiddles from the inverse root; then 1/L (and the Montgomery factor) */
+        pbn_ntt_twiddles(tw, L, pbn_ntt_powmod(m, w, p - 2), m);
+        pbn_ntt_inv(fa, L, tw, m);
+        scale = pbn_ntt_powmod(m, (pbn_limb)L % p, p - 2);          /* 1/L, plain */
+        for (i = 0; i < cn; i++) res[k][i] = pbn_ntt_mont(fa[i], scale, p, m->ni);
+    }
+
+    /* Garner: x = v1 + p1 v2 + p1 p2 v3, then carried into rp */
+    {
+        pbn_limb p1 = md[0].p, p2 = md[1].p, p3 = md[2].p, h12, l12;
+        /* Montgomery-form constants: 1/p1 mod p2, p1 mod p3, 1/(p1 p2) mod p3 */
+        pbn_limb i12 = pbn_ntt_mulmod(&md[1], pbn_ntt_powmod(&md[1], p1 % p2, p2 - 2), md[1].r1);
+        pbn_limb p13 = pbn_ntt_mulmod(&md[2], p1 % p3, md[2].r1);
+        pbn_limb i123 = pbn_ntt_mulmod(&md[2], pbn_ntt_powmod(&md[2], pbn_ntt_mulmod(&md[2], p1 % p3, p2 % p3), p3 - 2), md[2].r1);
+        l12 = pbn_umul(p1, p2, &h12);
+        for (i = 0; i < cn; i++) {
+            pbn_limb v1 = res[0][i], v2, v3, t, x0, x1, x2, hi, lo, cy;
+            /* v2 = (r2 - v1) / p1 mod p2 */
+            t = v1 >= p2 ? v1 - p2 : v1;
+            v2 = pbn_ntt_mont(pbn_ntt_sub(res[1][i], t, p2), i12, p2, md[1].ni);
+            /* v3 = (r3 - v1 - p1 v2) / (p1 p2) mod p3 */
+            t = v1;
+            while (t >= p3) t -= p3;
+            t = pbn_ntt_add(t, pbn_ntt_mont(v2, p13, p3, md[2].ni), p3);
+            v3 = pbn_ntt_mont(pbn_ntt_sub(res[2][i], t, p3), i123, p3, md[2].ni);
+            /* x = v1 + p1 v2 + (p1 p2) v3 */
+            x0 = pbn_umul(p1, v2, &x1);
+            x0 += v1; x1 += x0 < v1;
+            lo = pbn_umul(l12, v3, &hi);
+            x0 += lo; cy = x0 < lo;
+            x1 += hi; x2 = x1 < hi;
+            x1 += cy; x2 += x1 < cy;
+            lo = pbn_umul(h12, v3, &hi);
+            x1 += lo; x2 += (x1 < lo) + hi;
+            /* add the carry (c0, c1, c2) and emit the low limb */
+            x0 += c0; cy = x0 < c0;
+            x1 += cy; cy = x1 < cy;
+            x1 += c1; cy += x1 < c1;
+            x2 += c2 + cy;
+            rp[i] = x0;
+            c0 = x1; c1 = x2; c2 = 0;
+        }
+        rp[cn] = c0;
+    }
+    pbn_free_fn(buf, total * sizeof(pbn_limb));
+}
+#endif
+
 static void pbn_n_sqr(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
+#if defined(PBN_HAVE_FFT)
+    if (n >= PBN_SQR_FFT_THRESHOLD) { pbn_n_mul_fft(rp, ap, n, ap, n, 1); return; }
+#endif
     if (n < PBN_SQR_KARA_THRESHOLD) {
         pbn_n_sqr_basecase(rp, ap, n);
     } else {
@@ -1896,6 +2088,9 @@ static void pbn_n_mul(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_l
 
     if (bn < PBN_MUL_KARA_THRESHOLD) { pbn_n_mul_basecase(rp, ap, an, bp, bn); return; }
     if (ap == bp && an == bn) { pbn_n_sqr(rp, ap, an); return; }
+#if defined(PBN_HAVE_FFT)
+    if (bn >= PBN_MUL_FFT_THRESHOLD) { pbn_n_mul_fft(rp, ap, an, bp, bn, 0); return; }
+#endif
 
     mi = pbn_mul_itch(bn);
     itch = mi + 2 * bn;
