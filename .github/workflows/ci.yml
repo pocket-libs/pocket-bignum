@@ -25,7 +25,7 @@ jobs:
                 include:
                     - { name: linux-amd64-gcc,   os: ubuntu-latest,    cc: gcc   }
                     - { name: linux-amd64-clang, os: ubuntu-latest,    cc: clang }
-                    - { name: linux-arm64-gcc,   os: ubuntu-24.04-arm, cc: gcc   }
+                    - { name: linux-arm64-gcc,   os: ubuntu-24.04-arm, cc: gcc, split_san: true }
                     - { name: macos-arm64,       os: macos-latest,     cc: clang }
                     - { name: macos-amd64,       os: macos-15-intel,   cc: clang }
         steps:
@@ -46,11 +46,29 @@ jobs:
                 brew install gmp mpfr
                 echo "GMP_PREFIX=$(brew --prefix)" >> "$GITHUB_ENV"
 
+            # gcc on aarch64 is ~100x slower with ASan + UBSan together than with either one,
+            # so there we run each sanitizer on its own
+            - name: Set sanitizers
+              run: |
+                if [ "${{ matrix.split_san }}" = true ]; then
+                    echo 'SANS=-fsanitize=address -fno-omit-frame-pointer|-fsanitize=undefined' >> "$GITHUB_ENV"
+                else
+                    echo 'SANS=-fsanitize=address,undefined -fno-omit-frame-pointer' >> "$GITHUB_ENV"
+                fi
+
             - name: Test
-              run: make test CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=1
+              run: |
+                IFS='|'; i=0
+                for s in $SANS; do i=$((i+1))
+                    make test CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=1 SAN="$s" BUILD=build$i
+                done
 
             - name: Test (another seed)
-              run: make test64 test32 testportable testqf CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=${{ github.run_number }}
+              run: |
+                IFS='|'; i=0
+                for s in $SANS; do i=$((i+1))
+                    make test64 test32 testportable testqf CC=${{ matrix.cc }} GMP="$GMP_PREFIX" ITERS=$ITERS SEED=${{ github.run_number }} SAN="$s" BUILD=build$i
+                done
 
     # Same tests with MinGW (no sanitizers there)
     windows-mingw:
