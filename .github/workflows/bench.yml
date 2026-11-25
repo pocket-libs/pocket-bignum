@@ -39,12 +39,19 @@ jobs:
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
+            # macOS only when run by hand: its runners are noisy and few (they'd hold up
+            # the CI tests), so pushes and PRs are measured on Linux amd64 / arm64 only
             matrix:
-                include:
-                    - { name: linux-amd64, os: ubuntu-latest    }
-                    - { name: linux-arm64, os: ubuntu-24.04-arm }
-                    - { name: macos-arm64, os: macos-latest     }
-                    - { name: macos-amd64, os: macos-15-intel   }
+                include: >-
+                    ${{ fromJSON(github.event_name == 'workflow_dispatch' && '[
+                        { "name": "linux-amd64", "os": "ubuntu-latest"    },
+                        { "name": "linux-arm64", "os": "ubuntu-24.04-arm" },
+                        { "name": "macos-arm64", "os": "macos-latest"     },
+                        { "name": "macos-amd64", "os": "macos-15-intel"   }
+                    ]' || '[
+                        { "name": "linux-amd64", "os": "ubuntu-latest"    },
+                        { "name": "linux-arm64", "os": "ubuntu-24.04-arm" }
+                    ]') }}
         env:
             RUNS: ${{ github.event.inputs.runs || '5' }}
         steps:
