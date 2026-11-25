@@ -3496,6 +3496,66 @@ static void pbn_lin2x2(pbn_limb *na, pbn_limb *nb, const pbn_limb *ap, const pbn
 }
 #endif
 
+/* One Lehmer step on a >= b (bn >= 2, abits = bits of a > 64): the cofactors (A B; C D) of
+   (a, b) -> (A a + B b, C a + D b) from the leading digits (double-word from
+   PBN_GCD_LEHMER2_THRESHOLD limbs). Returns 0 when the leading digits give no quotient */
+static int pbn_lehmer_mat(const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn, pbn_bitcnt abits,
+                          int64_t *pA, int64_t *pB, int64_t *pC, int64_t *pD) {
+    int64_t ah, bh, A, B, C, D;
+#if defined(PBN_LEHMER2)
+    if (abits > 128 && an >= PBN_GCD_LEHMER2_THRESHOLD) {
+        /* double-word: the leading 126 bits, cofactors up to 2^62 (~63 bits per step) */
+        pbn_bitcnt sh = abits - 126;
+        pbn_sdlimb xa = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(ap, an, sh + 64) << 64) | pbn_getbits64(ap, an, sh));
+        pbn_sdlimb xb = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(bp, bn, sh + 64) << 64) | pbn_getbits64(bp, bn, sh));
+        int64_t a0 = 1, b0 = 0, c0 = 0, d0 = 1;
+        for (;;) {
+            pbn_sdlimb n1 = xa + a0, d1 = xb + c0, n2 = xa + b0, d2 = xb + d0, q, r2, tc, td;
+            if (d1 <= 0 || d2 <= 0 || n1 < 0 || n2 < 0) break;
+            q = pbn_lehmer_q(n1, d1);
+            if (q < 0) break;
+            r2 = n2 - q * d2;                 /* the other bound must give the same quotient */
+            if (r2 < 0 || r2 >= d2) break;
+            tc = (pbn_sdlimb)a0 - q * c0;
+            td = (pbn_sdlimb)b0 - q * d0;
+            if (tc >= PBN_LEHMER2_MAXE || tc <= -PBN_LEHMER2_MAXE || td >= PBN_LEHMER2_MAXE || td <= -PBN_LEHMER2_MAXE) break;
+            a0 = c0; c0 = (int64_t)tc;
+            b0 = d0; d0 = (int64_t)td;
+            tc = xa - q * xb; xa = xb; xb = tc;
+        }
+        if (b0 != 0) { *pA = a0; *pB = b0; *pC = c0; *pD = d0; return 1; }
+        /* no progress: try the single-word step */
+    }
+#endif
+    (void)bn;
+    ah = (int64_t)pbn_getbits64(ap, an, abits - PBN_LEHMER_BITS);
+    bh = (int64_t)pbn_getbits64(bp, bn, abits - PBN_LEHMER_BITS);
+    A = 1; B = 0; C = 0; D = 1;
+    for (;;) {
+        int64_t q, T, n1 = ah + A, d1 = bh + C, n2 = ah + B, d2 = bh + D;
+        if (d1 <= 0 || d2 <= 0) break;
+        /* quotient: by subtraction when small (the usual case) */
+        T = n1 - d1;
+        if (T < d1) q = n1 < d1 ? 0 : 1;
+        else if ((T -= d1) < d1) q = 2;
+        else if ((T -= d1) < d1) q = 3;
+        else q = n1 / d1;
+#if defined(PBN_LEHMER2)
+        {   /* the other bound must give the same quotient (checked by multiplying) */
+            pbn_sdlimb r2 = (pbn_sdlimb)n2 - (pbn_sdlimb)q * d2;
+            if (r2 < 0 || r2 >= d2) break;
+        }
+#else
+        if (q != n2 / d2) break;
+#endif
+        T = A - q * C; A = C; C = T;
+        T = B - q * D; B = D; D = T;
+        T = ah - q * bh; ah = bh; bh = T;
+    }
+    *pA = A; *pB = B; *pC = C; *pD = D;
+    return B != 0;
+}
+
 /* gcd of two positive numbers given as limb arrays (both destroyed, an,bn >= 1,
    each buffer must hold max(an,bn)+1 limbs). *res points at the result, returns its size.
    tp: 2 (max(an,bn)+1) limbs */
@@ -3504,7 +3564,7 @@ static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *b
     pbn_limb *t0 = tp, *t1 = tp + cap;
     for (;;) {
         pbn_bitcnt abits;
-        int64_t ah, bh, A, B, C, D;
+        int64_t A, B, C, D;
         if (an < bn || (an == bn && pbn_n_cmp(ap, bp, an) < 0)) {
             pbn_limb *t = ap; pbn_size tn = an;
             ap = bp; an = bn; bp = t; bn = tn;
@@ -3524,72 +3584,7 @@ static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *b
             break;
         }
 
-#if defined(PBN_LEHMER2)
-        if (abits > 128 && an >= PBN_GCD_LEHMER2_THRESHOLD) {
-            /* double-word Lehmer step on the leading 126 bits: cofactors up to 2^62, so each
-               step removes ~63 bits (Collins' test: both quotient bounds must agree) */
-            pbn_bitcnt sh = abits - 126;
-            pbn_sdlimb xa = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(ap, an, sh + 64) << 64) | pbn_getbits64(ap, an, sh));
-            pbn_sdlimb xb = (pbn_sdlimb)(((pbn_dlimb)pbn_getbits64(bp, bn, sh + 64) << 64) | pbn_getbits64(bp, bn, sh));
-            int64_t a0 = 1, b0 = 0, c0 = 0, d0 = 1;
-            for (;;) {
-                pbn_sdlimb n1 = xa + a0, d1 = xb + c0, n2 = xa + b0, d2 = xb + d0, q, r2, tc, td;
-                if (d1 <= 0 || d2 <= 0 || n1 < 0 || n2 < 0) break;
-                q = pbn_lehmer_q(n1, d1);
-                if (q < 0) break;
-                r2 = n2 - q * d2;                 /* the other bound must give the same quotient */
-                if (r2 < 0 || r2 >= d2) break;
-                tc = (pbn_sdlimb)a0 - q * c0;
-                td = (pbn_sdlimb)b0 - q * d0;
-                if (tc >= PBN_LEHMER2_MAXE || tc <= -PBN_LEHMER2_MAXE || td >= PBN_LEHMER2_MAXE || td <= -PBN_LEHMER2_MAXE) break;
-                a0 = c0; c0 = (int64_t)tc;
-                b0 = d0; d0 = (int64_t)td;
-                tc = xa - q * xb; xa = xb; xb = tc;
-            }
-            if (b0 != 0) {
-                /* (a, b) <- (a0 a + b0 b, c0 a + d0 b): each row has one entry <= 0 */
-                pbn_limb *t;
-                pbn_n_zero(bp + bn, an - bn);
-                pbn_lin2x2(t0, t1, ap, bp, an,
-                           (pbn_limb)(b0 <= 0 ? a0 : b0), (pbn_limb)(b0 <= 0 ? -b0 : -a0),
-                           (pbn_limb)(d0 <= 0 ? c0 : d0), (pbn_limb)(d0 <= 0 ? -d0 : -c0),
-                           b0 > 0, d0 > 0);
-                t = ap; ap = t0; t0 = t;
-                t = bp; bp = t1; t1 = t;
-                bn = an;
-                PBN_NORM(ap, an);
-                PBN_NORM(bp, bn);
-                continue;
-            }
-            /* no progress: fall through to the single-word step / a full division */
-        }
-#endif
-
-        /* Lehmer step on the leading bits */
-        ah = (int64_t)pbn_getbits64(ap, an, abits - PBN_LEHMER_BITS);
-        bh = (int64_t)pbn_getbits64(bp, bn, abits - PBN_LEHMER_BITS);
-        A = 1; B = 0; C = 0; D = 1;
-        for (;;) {
-            int64_t q, T, n1 = ah + A, d1 = bh + C, n2 = ah + B, d2 = bh + D;
-            if (d1 <= 0 || d2 <= 0) break;
-            /* quotient: by subtraction when small (the usual case) */
-            T = n1 - d1;
-            if (T < d1) q = n1 < d1 ? 0 : 1;
-            else if ((T -= d1) < d1) q = 2;
-            else if ((T -= d1) < d1) q = 3;
-            else q = n1 / d1;
-#if defined(PBN_LEHMER2)
-            {   /* the other bound must give the same quotient (checked by multiplying) */
-                pbn_sdlimb r2 = (pbn_sdlimb)n2 - (pbn_sdlimb)q * d2;
-                if (r2 < 0 || r2 >= d2) break;
-            }
-#else
-            if (q != n2 / d2) break;
-#endif
-            T = A - q * C; A = C; C = T;
-            T = B - q * D; B = D; D = T;
-            T = ah - q * bh; ah = bh; bh = T;
-        }
+        if (!pbn_lehmer_mat(ap, an, bp, bn, abits, &A, &B, &C, &D)) B = 0;
 
         if (B == 0) {
             /* no progress from the leading digits: one full division step (quotient in t1,
@@ -3625,12 +3620,216 @@ static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *b
     return an;
 }
 
+/* ---- subquadratic gcd: half-gcd, reducing from the leading halves recursively ----
+   Any matrix T with det +-1 keeps the gcd when (a, b) <- T (a, b) leaves both >= 0; that is
+   checked whenever a matrix found on truncated operands is applied to the full ones (one that
+   fails is skipped and plain Lehmer steps take over), so a wrong result is impossible.
+   T = s [[u0, -u1], [-u2, u3]] with every u_i >= 0 and s = +-1. */
+
+#if defined(PBN_LEHMER2)
+#  define PBN_HAVE_HGCD 1
+#  ifndef PBN_GCD_HGCD_THRESHOLD
+#    define PBN_GCD_HGCD_THRESHOLD 1000      /* limbs (of the smaller operand): half-gcd from here */
+#  endif
+#  ifndef PBN_HGCD_THRESHOLD
+#    define PBN_HGCD_THRESHOLD 100           /* limbs: below, the half-gcd by Lehmer steps */
+#  endif
+
+typedef struct { pbz_t u[4]; int s; } pbn_hmat;
+
+static void pbn_hmat_init(pbn_hmat *m) {
+    int i;
+    for (i = 0; i < 4; i++) pbz_init(m->u[i]);
+    pbz_set_ui(m->u[0], 1);
+    pbz_set_ui(m->u[3], 1);
+    m->s = 1;
+}
+
+static void pbn_hmat_clear(pbn_hmat *m) {
+    int i;
+    for (i = 0; i < 4; i++) pbz_clear(m->u[i]);
+}
+
+/* r = x u + y v (limb factors, everything >= 0); r doesn't alias u, v or t */
+static void pbn_hmat_lin(pbz_ptr r, pbn_limb x, pbz_srcptr u, pbn_limb y, pbz_srcptr v, pbz_ptr t) {
+    pbz_mul_limb(r, u, x, 0);
+    pbz_mul_limb(t, v, y, 0);
+    pbz_add(r, r, t);
+}
+
+/* m <- S m, S the matrix of a Lehmer step (a, b) -> (A a + B b, C a + D b) */
+static void pbn_hmat_step(pbn_hmat *m, int64_t A, int64_t B, int64_t C, int64_t D, pbz_ptr t, pbz_ptr n0, pbz_ptr n1) {
+    pbn_limb x0, x1, x2, x3;
+    if (B <= 0) { x0 = (pbn_limb)A;  x1 = (pbn_limb)-B; x2 = (pbn_limb)-C; x3 = (pbn_limb)D; }
+    else        { x0 = (pbn_limb)-A; x1 = (pbn_limb)B;  x2 = (pbn_limb)C;  x3 = (pbn_limb)-D; m->s = -m->s; }
+    pbn_hmat_lin(n0, x0, m->u[0], x1, m->u[2], t);
+    pbn_hmat_lin(n1, x2, m->u[0], x3, m->u[2], t);
+    pbz_swap(m->u[0], n0);
+    pbz_swap(m->u[2], n1);
+    pbn_hmat_lin(n0, x0, m->u[1], x1, m->u[3], t);
+    pbn_hmat_lin(n1, x2, m->u[1], x3, m->u[3], t);
+    pbz_swap(m->u[1], n0);
+    pbz_swap(m->u[3], n1);
+}
+
+/* m <- S m for a division step (a, b) -> (b, a - q b) */
+static void pbn_hmat_qstep(pbn_hmat *m, pbz_srcptr q) {
+    pbz_addmul(m->u[0], q, m->u[2]);
+    pbz_addmul(m->u[1], q, m->u[3]);
+    pbz_swap(m->u[0], m->u[2]);
+    pbz_swap(m->u[1], m->u[3]);
+    m->s = -m->s;
+}
+
+/* m <- S m for swapping (a, b) */
+static void pbn_hmat_swap(pbn_hmat *m) {
+    pbz_swap(m->u[0], m->u[2]);
+    pbz_swap(m->u[1], m->u[3]);
+    m->s = -m->s;
+}
+
+/* m <- a m */
+static void pbn_hmat_lmul(pbn_hmat *m, const pbn_hmat *a, pbz_ptr t) {
+    pbz_t r[4];
+    int i;
+    for (i = 0; i < 4; i++) pbz_init(r[i]);
+    pbz_mul(r[0], a->u[0], m->u[0]); pbz_mul(t, a->u[1], m->u[2]); pbz_add(r[0], r[0], t);
+    pbz_mul(r[1], a->u[0], m->u[1]); pbz_mul(t, a->u[1], m->u[3]); pbz_add(r[1], r[1], t);
+    pbz_mul(r[2], a->u[2], m->u[0]); pbz_mul(t, a->u[3], m->u[2]); pbz_add(r[2], r[2], t);
+    pbz_mul(r[3], a->u[2], m->u[1]); pbz_mul(t, a->u[3], m->u[3]); pbz_add(r[3], r[3], t);
+    for (i = 0; i < 4; i++) { pbz_swap(m->u[i], r[i]); pbz_clear(r[i]); }
+    m->s *= a->s;
+}
+
+/* (a, b) <- T (a, b) if both results are >= 0 (returns 1), else leaves them (returns 0) */
+static int pbn_hmat_apply(const pbn_hmat *m, pbz_ptr a, pbz_ptr b, pbz_ptr t0, pbz_ptr t1, pbz_ptr t2) {
+    pbz_mul(t0, m->u[0], a); pbz_mul(t2, m->u[1], b); pbz_sub(t0, t0, t2);
+    pbz_mul(t1, m->u[3], b); pbz_mul(t2, m->u[2], a); pbz_sub(t1, t1, t2);
+    if (m->s < 0) { pbz_neg(t0, t0); pbz_neg(t1, t1); }
+    if (SIZ(t0) < 0 || SIZ(t1) < 0) return 0;
+    pbz_swap(a, t0);
+    pbz_swap(b, t1);
+    return 1;
+}
+
+/* (a, b) <- T (a, b) for a = ah' B^p + al, b = bh' B^p + bl, where (ah', bh') = T (ah, bh)
+   was computed already (recursively): only the low parts need multiplying. Applied if both
+   results are >= 0 (returns 1) */
+static int pbn_hmat_adjust(const pbn_hmat *m, pbz_ptr a, pbz_ptr b, pbz_srcptr ah, pbz_srcptr bh, pbn_size p,
+                           pbz_ptr t0, pbz_ptr t1, pbz_ptr t2) {
+    pbz_t al, bl;
+    int ok;
+    pbz_init(al); pbz_init(bl);
+    pbz_tdiv_r_2exp(al, a, (pbn_bitcnt)p * PBN_B);
+    pbz_tdiv_r_2exp(bl, b, (pbn_bitcnt)p * PBN_B);
+    pbz_mul(t0, m->u[0], al); pbz_mul(t2, m->u[1], bl); pbz_sub(t0, t0, t2);
+    pbz_mul(t1, m->u[3], bl); pbz_mul(t2, m->u[2], al); pbz_sub(t1, t1, t2);
+    if (m->s < 0) { pbz_neg(t0, t0); pbz_neg(t1, t1); }
+    pbz_mul_2exp(t2, ah, (pbn_bitcnt)p * PBN_B); pbz_add(t0, t0, t2);
+    pbz_mul_2exp(t2, bh, (pbn_bitcnt)p * PBN_B); pbz_add(t1, t1, t2);
+    ok = SIZ(t0) >= 0 && SIZ(t1) >= 0;
+    if (ok) {
+        pbz_swap(a, t0);
+        pbz_swap(b, t1);
+    }
+    pbz_clear(al); pbz_clear(bl);
+    return ok;
+}
+
+/* Lehmer / division steps on a >= b > 0 while b has more than s limbs (into m if given) */
+static void pbn_hgcd_base(pbz_ptr a, pbz_ptr b, pbn_size s, pbn_hmat *m, pbz_ptr t0, pbz_ptr t1, pbz_ptr t2) {
+    while (SIZ(b) > s) {
+        pbn_size an = SIZ(a), bn = SIZ(b);
+        pbn_bitcnt abits = (pbn_bitcnt)an * PBN_B - (pbn_bitcnt)pbn_clz(PTR(a)[an - 1]);
+        int64_t A, B, C, D;
+        if (bn >= 2 && abits > 64 && pbn_lehmer_mat(PTR(a), an, PTR(b), bn, abits, &A, &B, &C, &D)) {
+            pbn_limb *na = PBZ_GROW(t0, an), *nb = PBZ_GROW(t1, an), *bp = PBZ_GROW(b, an);
+            pbn_size n0 = an, n1 = an;
+            pbn_n_zero(bp + bn, an - bn);
+            pbn_lin2x2(na, nb, PTR(a), bp, an,
+                       (pbn_limb)(B <= 0 ? A : B), (pbn_limb)(B <= 0 ? -B : -A),
+                       (pbn_limb)(D <= 0 ? C : D), (pbn_limb)(D <= 0 ? -D : -C),
+                       B > 0, D > 0);
+            PBN_NORM(na, n0);
+            PBN_NORM(nb, n1);
+            SIZ(t0) = (int)n0;
+            SIZ(t1) = (int)n1;
+            pbz_swap(a, t0);
+            pbz_swap(b, t1);
+            if (m) pbn_hmat_step(m, A, B, C, D, t2, t0, t1);
+        } else {
+            pbz_tdiv_qr(t2, t0, a, b);
+            pbz_swap(a, b);
+            pbz_swap(b, t0);
+            if (m) pbn_hmat_qstep(m, t2);
+        }
+        if (pbz_cmp(a, b) < 0) {
+            pbz_swap(a, b);
+            if (m) pbn_hmat_swap(m);
+        }
+    }
+}
+
+/* reduces a >= b > 0 (n = size of a) until b has at most n/2 + 1 limbs; the transformation
+   goes into m (new = T old) if given */
+static void pbn_hgcd(pbz_ptr a, pbz_ptr b, pbn_hmat *m) {
+    pbn_size n = SIZ(a), s = n / 2 + 1, k;
+    pbz_t t0, t1, t2;
+    if (SIZ(b) <= s) return;
+    pbz_init(t0); pbz_init(t1); pbz_init(t2);
+    if (n >= PBN_HGCD_THRESHOLD) {
+        pbz_t ah, bh;
+        pbn_hmat m1;
+        pbz_init(ah); pbz_init(bh);
+        for (k = 0; k < 2 && SIZ(b) > s; k++) {
+            /* 1st pass: the leading n - n/2 limbs; 2nd: enough leading limbs to get down to s */
+            pbn_size cur = SIZ(a), h = k == 0 ? n - n / 2 : 2 * (cur - s) + 2, p;
+            if (h >= cur) break;
+            p = cur - h;
+            pbz_tdiv_q_2exp(ah, a, (pbn_bitcnt)p * PBN_B);
+            pbz_tdiv_q_2exp(bh, b, (pbn_bitcnt)p * PBN_B);
+            pbn_hmat_init(&m1);
+            pbn_hgcd(ah, bh, &m1);
+            if ((SIZ(m1.u[1]) || SIZ(m1.u[2])) && pbn_hmat_adjust(&m1, a, b, ah, bh, p, t0, t1, t2)) {
+                if (pbz_cmp(a, b) < 0) {
+                    pbz_swap(a, b);
+                    pbn_hmat_swap(&m1);
+                }
+                if (m) pbn_hmat_lmul(m, &m1, t0);
+            }
+            pbn_hmat_clear(&m1);
+        }
+        pbz_clear(ah); pbz_clear(bh);
+    }
+    pbn_hgcd_base(a, b, s, m, t0, t1, t2);
+    pbz_clear(t0); pbz_clear(t1); pbz_clear(t2);
+}
+#endif
+
 PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
     pbn_size an = PBN_ABS(SIZ(a)), bn = PBN_ABS(SIZ(b)), n, rn, tn;
     pbn_limb *buf, *x, *y, *gp;
     PBN_TMP_DECL(gb);
     if (an == 0) { pbz_abs(g, b); return; }
     if (bn == 0) { pbz_abs(g, a); return; }
+#if defined(PBN_HAVE_HGCD)
+    if (an >= PBN_GCD_HGCD_THRESHOLD && bn >= PBN_GCD_HGCD_THRESHOLD) {
+        pbz_t x, y;
+        pbz_init(x); pbz_init(y);
+        pbz_abs(x, a);
+        pbz_abs(y, b);
+        if (pbz_cmp(x, y) < 0) pbz_swap(x, y);
+        while (SIZ(y) >= PBN_GCD_HGCD_THRESHOLD) {
+            pbn_hgcd(x, y, NULL);
+            if (SIZ(y) == 0) break;
+            pbz_tdiv_r(x, x, y);           /* one division step: progress even if hgcd made none */
+            pbz_swap(x, y);
+        }
+        pbz_gcd(g, x, y);                  /* the rest below the threshold */
+        pbz_clear(x); pbz_clear(y);
+        return;
+    }
+#endif
     if (an == 1 && bn == 1) {
         pbn_limb v = pbn_gcd_limb(PTR(a)[0], PTR(b)[0]);
         gp = PBZ_GROW(g, 1);

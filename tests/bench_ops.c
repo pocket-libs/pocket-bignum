@@ -81,6 +81,12 @@ int main(int argc, char **argv) {
     }
     for (i = 0; i < sizeof sizes / sizeof sizes[0] && sizes[i] <= max; i++) {
         long n = sizes[i];
+        random_bits(a, n);
+        random_bits(b, n);
+        BENCH("gcd", n, pbz_gcd(c, a, b));
+    }
+    for (i = 0; i < sizeof sizes / sizeof sizes[0] && sizes[i] <= max; i++) {
+        long n = sizes[i];
         char *s;
         random_bits(a, n);
         s = pbz_get_str(NULL, 10, a);
