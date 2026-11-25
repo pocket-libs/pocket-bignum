@@ -4588,6 +4588,21 @@ static const uint64_t pbn_fac_tab[21] = {
     6402373705728000u, 121645100408832000u, 2432902008176640000u
 };
 
+/* n! below the swing threshold: the direct product of 2..n, packed into limbs (no separate
+   power of 2: its shift would cost more than it saves); a function of its own, so that its
+   stack buffer doesn't weigh on the n! that come from the table */
+static PBN_NOINLINE void pbn_fac_small(pbz_ptr r, unsigned long n) {
+    pbn_size cnt = 0, cap = (pbn_size)(n / 2 + 2);
+    pbn_limb cur = 1, *v, buf[PBN_FAC_STACK];
+    unsigned long i;
+    if (PBN_B == 32 && n > 65535UL) cap = (pbn_size)(n + 2);
+    v = cap <= PBN_FAC_STACK ? buf : PBN_TMP_ALLOC(cap);
+    for (i = 2; i <= n; i++) pbn_fac_push(v, &cnt, &cur, (pbn_limb)i);
+    v[cnt++] = cur;
+    pbn_prod_limbs(r, v, 0, cnt);
+    if (v != buf) PBN_TMP_FREE(v, cap);
+}
+
 PBN_DEF void pbz_fac_ui(pbz_ptr r, unsigned long n) {
     if (n <= (PBN_B == 64 ? 20UL : 12UL)) {
         /* n! fits in a limb */
@@ -4597,20 +4612,8 @@ PBN_DEF void pbz_fac_ui(pbz_ptr r, unsigned long n) {
         return;
     }
     if ((pbn_limb)n != n) PBN_ABORT("factorial argument too large");
-    if (n >= PBN_FAC_SWING_THRESHOLD) { pbn_fac_swing(r, n); return; }
-    {
-        /* direct product of 2..n, packed into limbs (small n: no separate power of 2, its
-           shift would cost more than it saves) */
-        pbn_size cnt = 0, cap = (pbn_size)(n / 2 + 2);
-        pbn_limb cur = 1, *v, buf[PBN_FAC_STACK];
-        unsigned long i;
-        if (PBN_B == 32 && n > 65535UL) cap = (pbn_size)(n + 2);
-        v = cap <= PBN_FAC_STACK ? buf : PBN_TMP_ALLOC(cap);
-        for (i = 2; i <= n; i++) pbn_fac_push(v, &cnt, &cur, (pbn_limb)i);
-        v[cnt++] = cur;
-        pbn_prod_limbs(r, v, 0, cnt);
-        if (v != buf) PBN_TMP_FREE(v, cap);
-    }
+    if (n >= PBN_FAC_SWING_THRESHOLD) pbn_fac_swing(r, n);
+    else pbn_fac_small(r, n);
 }
 
 /* ---- primality ---- */
