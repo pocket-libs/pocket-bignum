@@ -4155,11 +4155,65 @@ static int pbn_jacobi_small(long D, pbz_srcptr n) {
     return j;
 }
 
-/* strong Lucas probable prime test, Selfridge parameters */
+/* arithmetic modulo an odd n of nn limbs in Montgomery form (x R mod n, R = B^nn) */
+typedef struct { const pbn_limb *mp; pbn_size n; pbn_limb minv, *tp; } pbn_mctx;   /* tp: 2n limbs */
+
+static void pbn_mc_mul(const pbn_mctx *c, pbn_limb *r, const pbn_limb *a, const pbn_limb *b) {
+    if (a == b) pbn_n_sqr(c->tp, a, c->n);
+    else        pbn_n_mul(c->tp, a, c->n, b, c->n);
+    pbn_n_redc(r, c->tp, c->mp, c->n, c->minv);
+}
+
+/* r = a - b mod n */
+static void pbn_mc_sub(const pbn_mctx *c, pbn_limb *r, const pbn_limb *a, const pbn_limb *b) {
+    if (pbn_n_sub_n(r, a, b, c->n)) pbn_n_add_n(r, r, c->mp, c->n);
+}
+
+/* r = a + b mod n */
+static void pbn_mc_add(const pbn_mctx *c, pbn_limb *r, const pbn_limb *a, const pbn_limb *b) {
+    if (pbn_n_add_n(r, a, b, c->n) || pbn_n_cmp(r, c->mp, c->n) >= 0) pbn_n_sub_n(r, r, c->mp, c->n);
+}
+
+/* r = a q mod n for a small q != 0 (Montgomery form is linear: no reduction by R needed);
+   a q < |q| n, so a few subtractions reduce it. t: n + 1 limbs */
+static void pbn_mc_mul_si(const pbn_mctx *c, pbn_limb *r, const pbn_limb *a, long q, pbn_limb *t) {
+    pbn_size n = c->n;
+    pbn_limb aq = (pbn_limb)(q < 0 ? -q : q);
+    t[n] = pbn_n_mul_1(t, a, n, aq);
+    while (t[n] || pbn_n_cmp(t, c->mp, n) >= 0)
+        t[n] -= pbn_n_sub_n(t, t, c->mp, n);
+    if (q < 0) {
+        pbn_size k = n;
+        PBN_NORM(t, k);
+        if (k) pbn_n_sub_n(r, c->mp, t, n);
+        else   pbn_n_zero(r, n);
+    } else {
+        pbn_n_copy(r, t, n);
+    }
+}
+
+/* rp[0..nn) = x R mod n (x a small signed integer) */
+static void pbn_mc_from_si(pbn_limb *rp, long x, pbz_srcptr n, pbz_ptr t) {
+    pbn_size nn = SIZ(n), k;
+    pbz_set_si(t, x);
+    pbz_mul_2exp(t, t, (pbn_bitcnt)nn * PBN_B);
+    pbz_mod(t, t, n);
+    k = SIZ(t);
+    pbn_n_copy(rp, PTR(t), k);
+    pbn_n_zero(rp + k, nn - k);
+}
+
+/* strong Lucas probable prime test, Selfridge parameters (P = 1, Q = (1 - D) / 4).
+   With n + 1 = d 2^s: n passes if U_d = 0 or V_{d 2^r} = 0 (mod n) for some r < s. Only V is
+   computed (Lucas chain on V_k, V_{k+1}), in Montgomery form; U_d = 0 iff 2 V_{d+1} = P V_d,
+   as D U_k = 2 V_{k+1} - P V_k and D is invertible mod n (jacobi(D/n) = -1) */
 static int pbn_strong_lucas(pbz_srcptr n) {
     long D = 5, Q;
-    pbz_t d, U, V, Qk, t, Dz;
+    pbz_t d, t;
     pbn_bitcnt s = 0, i, bits;
+    pbn_size nn = SIZ(n);
+    pbn_limb *buf, *V, *V1, *Qk, *Qm, *Q1, *w;
+    pbn_mctx c;
     int res = 0, j;
 
     for (;;) {
@@ -4171,52 +4225,68 @@ static int pbn_strong_lucas(pbz_srcptr n) {
     }
     Q = (1 - D) / 4;
 
-    pbz_inits(d, U, V, Qk, t, Dz, (pbz_ptr)NULL);
+    pbz_init(d);
+    pbz_init(t);
     pbz_add_ui(d, n, 1);
     while (!pbz_tstbit(d, s)) s++;
     pbz_tdiv_q_2exp(d, d, s);
 
-    pbz_set_si(Dz, D);
-    pbz_mod(Dz, Dz, n);
-    pbz_set_ui(U, 1);
-    pbz_set_ui(V, 1);
-    pbz_set_si(Qk, Q);
-    pbz_mod(Qk, Qk, n);
+    buf = PBN_TMP_ALLOC(8 * nn);
+    V = buf; V1 = V + nn; Qk = V1 + nn; Qm = Qk + nn; Q1 = Qm + nn; w = Q1 + nn;
+    c.mp = PTR(n);
+    c.n = nn;
+    c.minv = pbn_binvert_neg(c.mp[0]);
+    c.tp = w + nn;     /* 2 nn limbs */
+
+    pbn_mc_from_si(V, 1, n, t);                 /* V_1 = P */
+    pbn_mc_from_si(V1, 1 - 2 * Q, n, t);        /* V_2 = P^2 - 2Q */
+    pbn_mc_from_si(Qm, Q, n, t);
+    pbn_n_copy(Qk, Qm, nn);                     /* Q^1 */
 
     bits = pbz_bitlen(d);
     for (i = bits - 1; i-- > 0;) {
-        pbz_mul(U, U, V);
-        pbz_tdiv_r(U, U, n);
-        pbz_mul(V, V, V);
-        pbz_submul_ui(V, Qk, 2);
-        pbz_mod(V, V, n);
-        pbz_mul(Qk, Qk, Qk);
-        pbz_tdiv_r(Qk, Qk, n);
         if (pbz_tstbit(d, i)) {
-            pbz_add(t, U, V);                 /* U' = (P*U + V) / 2      */
-            pbz_mul(U, Dz, U);
-            pbz_add(V, V, U);                 /* V' = (D*U + P*V) / 2    */
-            pbz_tdiv_r(t, t, n);
-            if (pbz_odd_p(t)) pbz_add(t, t, n);
-            pbz_tdiv_q_2exp(U, t, 1);
-            pbz_tdiv_r(V, V, n);
-            if (pbz_odd_p(V)) pbz_add(V, V, n);
-            pbz_tdiv_q_2exp(V, V, 1);
-            pbz_mul_si(Qk, Qk, Q);
-            pbz_mod(Qk, Qk, n);
+            /* k -> 2k + 1: V_{2k+1} = V_k V_{k+1} - P Q^k, V_{2k+2} = V_{k+1}^2 - 2 Q^{k+1} */
+            pbn_mc_mul_si(&c, Q1, Qk, Q, c.tp);
+            pbn_mc_mul(&c, w, V, V1);
+            pbn_mc_sub(&c, V, w, Qk);
+            pbn_mc_mul(&c, w, V1, V1);
+            pbn_mc_sub(&c, w, w, Q1);
+            pbn_mc_sub(&c, V1, w, Q1);
+            pbn_mc_mul(&c, Qk, Qk, Q1);
+        } else {
+            /* k -> 2k: V_{2k} = V_k^2 - 2 Q^k, V_{2k+1} = V_k V_{k+1} - P Q^k */
+            pbn_mc_mul(&c, w, V, V1);
+            pbn_mc_sub(&c, V1, w, Qk);
+            pbn_mc_mul(&c, w, V, V);
+            pbn_mc_sub(&c, w, w, Qk);
+            pbn_mc_sub(&c, V, w, Qk);
+            pbn_mc_mul(&c, Qk, Qk, Qk);
         }
     }
-    if (SIZ(U) == 0 || SIZ(V) == 0) { res = 1; goto done; }
+
+    /* U_d = 0: 2 V_{d+1} - V_d = 0 */
+    pbn_mc_add(&c, w, V1, V1);
+    pbn_mc_sub(&c, w, w, V);
+    {
+        pbn_size k = nn, k2 = nn;
+        PBN_NORM(w, k);
+        PBN_NORM(V, k2);
+        if (k == 0 || k2 == 0) { res = 1; goto done; }
+    }
     for (i = 1; i < s; i++) {
-        pbz_mul(V, V, V);
-        pbz_submul_ui(V, Qk, 2);
-        pbz_mod(V, V, n);
-        if (SIZ(V) == 0) { res = 1; goto done; }
-        pbz_mul(Qk, Qk, Qk);
-        pbz_tdiv_r(Qk, Qk, n);
+        pbn_size k = nn;
+        pbn_mc_mul(&c, w, V, V);
+        pbn_mc_sub(&c, w, w, Qk);
+        pbn_mc_sub(&c, V, w, Qk);
+        PBN_NORM(V, k);
+        if (k == 0) { res = 1; goto done; }
+        if (i + 1 < s) pbn_mc_mul(&c, Qk, Qk, Qk);
     }
 done:
-    pbz_clears(d, U, V, Qk, t, Dz, (pbz_ptr)NULL);
+    PBN_TMP_FREE(buf, 8 * nn);
+    pbz_clear(d);
+    pbz_clear(t);
     return res;
 }
 
