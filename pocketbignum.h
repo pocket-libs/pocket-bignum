@@ -4451,17 +4451,23 @@ PBN_DEF int pbz_invert(pbz_ptr r, pbz_srcptr a, pbz_srcptr m) {
 
 /* ---- factorial ---- */
 
+#ifndef PBN_PRODLIMBS_THRESHOLD
+#  define PBN_PRODLIMBS_THRESHOLD 32
+#endif
+
+/* r = v[lo] * ... * v[hi - 1] (hi > lo, all of them nonzero) */
 static void pbn_prod_limbs(pbz_ptr r, const pbn_limb *v, pbn_size lo, pbn_size hi) {
-    if (hi - lo <= 16) {
-        pbn_size i;
-        pbz_set_ui(r, 1);
-        for (i = lo; i < hi; i++) {
-            pbn_size rn = SIZ(r);
-            pbn_limb *rp = PBZ_GROW(r, rn + 1), cy;
-            cy = pbn_n_mul_1(rp, rp, rn, v[i]);
+    if (hi - lo <= PBN_PRODLIMBS_THRESHOLD) {
+        /* one limb at a time, into a result sized once (k limbs make at most k) */
+        pbn_limb *rp = PBZ_GROW(r, hi - lo);
+        pbn_size i, rn = 1;
+        rp[0] = v[lo];
+        for (i = lo + 1; i < hi; i++) {
+            pbn_limb cy = pbn_n_mul_1(rp, rp, rn, v[i]);
             rp[rn] = cy;
-            SIZ(r) = (int)(rn + (cy != 0));
+            rn += cy != 0;
         }
+        SIZ(r) = (int)rn;
     } else {
         pbz_t t;
         pbn_size mid = lo + (hi - lo) / 2;
@@ -4495,17 +4501,19 @@ PBN_INLINE void pbn_fac_push(pbn_limb *v, pbn_size *cnt, pbn_limb *cur, pbn_limb
 
 /* r = oddpart(m!) = the product of the odd parts of 2..m (m >= 1), packed into limbs
    and multiplied with a product tree */
+#define PBN_FAC_STACK (PBN_FAC_SWING_THRESHOLD / 2 + 2)   /* packed factors of m < the threshold */
+
 static void pbn_fac_odd(pbz_ptr r, unsigned long m) {
     pbn_size cnt = 0, cap = (pbn_size)(m / 2 + 2);
-    pbn_limb cur = 1, *v;
+    pbn_limb cur = 1, *v, buf[PBN_FAC_STACK];
     unsigned long i;
     if (PBN_B == 32 && m > 65535UL) cap = (pbn_size)(m + 2);
-    v = PBN_TMP_ALLOC(cap);
+    v = cap <= PBN_FAC_STACK ? buf : PBN_TMP_ALLOC(cap);
     for (i = 3; i <= m; i++)
         pbn_fac_push(v, &cnt, &cur, (pbn_limb)i >> pbn_ctz((pbn_limb)i));
     v[cnt++] = cur;
     pbn_prod_limbs(r, v, 0, cnt);
-    PBN_TMP_FREE(v, cap);
+    if (v != buf) PBN_TMP_FREE(v, cap);
 }
 
 static unsigned long pbn_popcount_ul(unsigned long x) {
@@ -4594,12 +4602,14 @@ PBN_DEF void pbz_fac_ui(pbz_ptr r, unsigned long n) {
         /* direct product of 2..n, packed into limbs (small n: no separate power of 2, its
            shift would cost more than it saves) */
         pbn_size cnt = 0, cap = (pbn_size)(n / 2 + 2);
-        pbn_limb cur = 1, *v = PBN_TMP_ALLOC(cap);
+        pbn_limb cur = 1, *v, buf[PBN_FAC_STACK];
         unsigned long i;
+        if (PBN_B == 32 && n > 65535UL) cap = (pbn_size)(n + 2);
+        v = cap <= PBN_FAC_STACK ? buf : PBN_TMP_ALLOC(cap);
         for (i = 2; i <= n; i++) pbn_fac_push(v, &cnt, &cur, (pbn_limb)i);
         v[cnt++] = cur;
         pbn_prod_limbs(r, v, 0, cnt);
-        PBN_TMP_FREE(v, cap);
+        if (v != buf) PBN_TMP_FREE(v, cap);
     }
 }
 
