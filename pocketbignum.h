@@ -1412,8 +1412,8 @@ static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *n
 
 /* ---- multiplication ---- */
 
-/* With the assembly kernels, from this many limbs on, the schoolbook rows go one at
-   a time through addmul_1 (faster there than two at a time with the C addmul_2) */
+/* With the x86-64 kernels (BMI2 & ADX), from this many limbs on, the schoolbook rows go
+   one at a time through addmul_1 (faster there than two at a time with the C addmul_2) */
 #ifndef PBN_MUL_ASM_ROWS
 #  define PBN_MUL_ASM_ROWS 12
 #endif
@@ -1421,9 +1421,7 @@ static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *n
 PBN_INLINE int pbn_asm_rows(pbn_size n) {
 #if defined(PBN_ASM_X86)
     return n >= PBN_MUL_ASM_ROWS && pbn_cpu_adx();
-#elif defined(PBN_ASM_ARM64)
-    return n >= PBN_MUL_ASM_ROWS;
-#else
+#else                                   /* (on arm64, the C addmul_2 is faster) */
     (void)n;
     return 0;
 #endif
