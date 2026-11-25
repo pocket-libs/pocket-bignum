@@ -1020,7 +1020,61 @@ static pbn_limb pbn_n_divrem_1(pbn_limb *qp, const pbn_limb *np, pbn_size n, pbn
     return r >> s;
 }
 
-/* ---- schoolbook division (Knuth D). qp: nn-dn+1 limbs, rp: dn limbs ---- */
+/* 3/2 reciprocal floor((B^3 - 1) / (d1 B + d0)) - B, d1 normalized (Moller & Granlund,
+   "Improved division by invariant integers", Algorithm 6) */
+static pbn_limb pbn_invert_3by2(pbn_limb d1, pbn_limb d0) {
+    pbn_limb v = pbn_invert_limb(d1), p = d1 * v, t1, t0;
+    p += d0;
+    if (p < d0) {
+        v--;
+        if (p >= d1) { v--; p -= d1; }
+        p -= d1;
+    }
+    t0 = pbn_umul(v, d0, &t1);
+    p += t1;
+    if (p < t1) {
+        v--;
+        if (p > d1 || (p == d1 && t0 >= d0)) v--;
+    }
+    return v;
+}
+
+/* (n2 n1 n0) / (d1 d0) for (n2 n1) < (d1 d0), d1 normalized, v = pbn_invert_3by2(d1, d0):
+   the quotient, and the remainder in *r1:*r0 (Algorithm 5) */
+PBN_INLINE pbn_limb pbn_div_3by2(pbn_limb *r1p, pbn_limb *r0p, pbn_limb n2, pbn_limb n1, pbn_limb n0,
+                                 pbn_limb d1, pbn_limb d0, pbn_limb v) {
+    pbn_limb q1, q0, r1, r0, t1, t0, bw;
+    q0 = pbn_umul(v, n2, &q1);
+    q0 += n1;
+    q1 += n2 + (q0 < n1);
+    r1 = n1 - q1 * d1;
+    t0 = pbn_umul(d0, q1, &t1);
+    /* (r1, r0) = (r1, n0) - (t1, t0) - (d1, d0) */
+    bw = n0 < t0;
+    r0 = n0 - t0;
+    r1 = r1 - t1 - bw;
+    bw = r0 < d0;
+    r0 -= d0;
+    r1 = r1 - d1 - bw;
+    q1++;
+    if (r1 >= q0) {
+        q1--;
+        r0 += d0;
+        r1 += d1 + (r0 < d0);
+    }
+    if (PBN_UNLIKELY(r1 > d1 || (r1 == d1 && r0 >= d0))) {
+        q1++;
+        bw = r0 < d0;
+        r0 -= d0;
+        r1 -= d1 + bw;
+    }
+    *r1p = r1;
+    *r0p = r0;
+    return q1;
+}
+
+/* ---- schoolbook division (Knuth D, quotient limbs by 3/2 division). qp: nn-dn+1 limbs,
+        rp: dn limbs ---- */
 static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
                           const pbn_limb *dp, pbn_size dn) {
     int s;
@@ -1047,39 +1101,38 @@ static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *n
 
     d1 = dd[dn - 1];
     d0 = dd[dn - 2];
-    di = pbn_invert_limb(d1);
+    di = pbn_invert_3by2(d1, d0);
 
     for (j = nn - dn; j >= 0; j--) {
         pbn_limb n2 = u[j + dn], n1 = u[j + dn - 1], n0 = u[j + dn - 2];
-        pbn_limb qhat, rhat, cy;
-        int rover = 0;
+        pbn_limb q, r1, r0, cy, cy1;
 
-        if (PBN_UNLIKELY(n2 == d1)) {
-            qhat = PBN_LIMB_MAX;
-            rhat = n1 + d1;
-            rover = rhat < d1;
-        } else {
-            qhat = pbn_div_preinv(&rhat, n2, n1, d1, di);
-        }
-
-        if (!rover) {
-            pbn_limb ph, pl = pbn_umul(qhat, d0, &ph);
-            while (ph > rhat || (ph == rhat && pl > n0)) {
-                qhat--;
-                rhat += d1;
-                if (rhat < d1) break;
-                if (pl < d0) ph--;
-                pl -= d0;
+        if (PBN_UNLIKELY(n2 == d1 && n1 == d0)) {
+            /* (n2 n1) = (d1 d0): the 3/2 division doesn't apply, q is B-1 (or one less) */
+            q = PBN_LIMB_MAX;
+            cy = pbn_n_submul_1(u + j, dd, dn, q);
+            if (n2 < cy) {
+                q--;
+                pbn_n_add_n(u + j, u + j, dd, dn);
             }
-        }
-
-        cy = pbn_n_submul_1(u + j, dd, dn, qhat);
-        if (PBN_UNLIKELY(n2 < cy)) {
-            qhat--;
-            pbn_n_add_n(u + j, u + j, dd, dn);
+        } else {
+            /* q and the top two limbs of the remainder from the top limbs, then the rest */
+            q = pbn_div_3by2(&r1, &r0, n2, n1, n0, d1, d0, di);
+            cy = pbn_n_submul_1(u + j, dd, dn - 2, q);
+            cy1 = r0 < cy;
+            r0 -= cy;
+            cy = r1 < cy1;
+            r1 -= cy1;
+            u[j + dn - 2] = r0;
+            if (PBN_UNLIKELY(cy)) {
+                /* q was one too big: add the divisor back */
+                r1 += d1 + pbn_n_add_n(u + j, u + j, dd, dn - 1);
+                q--;
+            }
+            u[j + dn - 1] = r1;
         }
         u[j + dn] = 0;
-        qp[j] = qhat;
+        qp[j] = q;
     }
 
     if (s) pbn_n_rshift(rp, u, dn, (unsigned)s);
