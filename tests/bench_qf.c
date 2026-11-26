@@ -13,12 +13,14 @@ static volatile long sink;
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 
 #define MIN_TIME 0.12
+/* keeps the compiler from hoisting a cheap, inlined statement out of the timing loop */
+#define BARRIER() __asm__ __volatile__("" ::: "memory")
 #define BENCH(label, P, R) do {                                                     \
     double t0, tp, tr; long it, reps = 1;                                           \
-    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { P; }                     \
+    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { P; BARRIER(); }         \
                tp = now() - t0; if (tp > MIN_TIME) break; reps *= 2; }              \
     tp /= reps; reps = 1;                                                           \
-    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { R; }                     \
+    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { R; BARRIER(); }         \
                tr = now() - t0; if (tr > MIN_TIME) break; reps *= 2; }              \
     tr /= reps;                                                                     \
     printf("%-26s %10.1f %10.1f   %5.2fx\n", label, tp * 1e9, tr * 1e9, tp / tr);   \

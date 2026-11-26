@@ -14,6 +14,8 @@
 #include <time.h>
 
 #define MIN_TIME 0.1
+/* keeps the compiler from hoisting a cheap, inlined statement out of the timing loop */
+#define BARRIER() __asm__ __volatile__("" ::: "memory")
 
 static double now(void) {
     struct timespec ts;
@@ -26,7 +28,7 @@ static volatile long sink;
 
 #define BENCH(label, n, STMT) do {                                              \
     double t0, t; long it, reps = 1;                                            \
-    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { STMT; }              \
+    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { STMT; BARRIER(); }  \
                t = now() - t0; if (t > MIN_TIME) break; reps *= 2; }            \
     printf("%s %d %.2f\n", label, (int)(n), t / (double)reps * 1e9);            \
     fflush(stdout);                                                             \
