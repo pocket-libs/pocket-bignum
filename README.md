@@ -82,9 +82,9 @@ Every algorithm threshold (`PBN_MUL_TOOM3_THRESHOLD`, `PBN_MUL_FFT_THRESHOLD`, e
 
 | Layer | Functions |
 |---|---|
-| `mpz` | ~115: arithmetic, all t/f/c divisions, 2exp ops, bitwise (two's complement), pow/powm/invert, gcd/lcm, sqrt, fac, primality (BPSW), nextprime, conversions, strings |
+| `mpz` | ~145: arithmetic, all t/f/c divisions, 2exp ops, bitwise (two's complement), scan0/scan1, pow/powm/invert, gcd/gcdext/lcm, sqrt/root, perfect powers, jacobi/kronecker, remove, congruences, fac/2fac/mfac, primorial, binomials, Fibonacci & Lucas numbers, primality (BPSW), next/prevprime, conversions, strings |
 | `mpq` | ~30: canonicalize, add/sub/mul/div, inv/neg/abs, mul/div_2exp, cmp*, get/set_d, get/set_str, num/den access |
-| `mpfr` | ~50: init/clear/prec, set/get (d, si, ui, z, str), cmp*, fits_uint_p, add/sub/mul/div (+ `_z`, `_d`), pow, pow_z, predicates. All 5 rounding modes, correct rounding, ternary values, exponent range [1-2^30, 2^30-1] - like MPFR |
+| `mpfr` | ~85: init/clear/prec, set/get (d, si, ui, z, str), cmp*, comparison predicates, fits_uint_p, add/sub/mul/div (+ `_z`, `_d`, `_ui`, `_si`), sqr, min/max, floor/ceil/trunc, setsign/copysign, pow, pow_z, predicates. All 5 rounding modes, correct rounding, ternary values, exponent range [1-2^30, 2^30-1] - like MPFR |
 
 The semantics follow GMP/MPFR precisely - edge cases included: `mpz_probab_prime_p`'s 2/1/0 cutoffs, `mpq_set_si(0, d)` → 0/1, `mpfr_get_str` digit counts and MPFR's double-rounding of ties, `mpfr_set_str`'s syntax (`@inf@`, `nan(...)`, `0x...p`, `@` exponents), signed zeros, and `pow`'s special cases (C99 Annex F).
 
