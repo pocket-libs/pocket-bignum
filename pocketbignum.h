@@ -726,8 +726,13 @@ static int pbn_n_cmp2(const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_s
     return pbn_n_cmp(ap, bp, an);
 }
 
-static pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n);
-static pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n);
+#ifndef PBN_ADDSUB_ASM_THRESHOLD
+#  define PBN_ADDSUB_ASM_THRESHOLD 8     /* limbs: below, the (inlined) C loop is just as fast */
+#endif
+
+/* from PBN_ADDSUB_ASM_THRESHOLD limbs on (further down: assembly where there is) */
+static pbn_limb pbn_n_add_n_long(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n);
+static pbn_limb pbn_n_sub_n_long(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n);
 
 static pbn_limb pbn_n_add_n_c(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n, pbn_limb cy) {
     pbn_size i = 0;
@@ -751,6 +756,14 @@ static pbn_limb pbn_n_sub_n_c(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *
     }
     for (; i < n; i++) rp[i] = pbn_subb(ap[i], bp[i], bw, &bw);
     return bw;
+}
+
+PBN_INLINE pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+    return n < PBN_ADDSUB_ASM_THRESHOLD ? pbn_n_add_n_c(rp, ap, bp, n, 0) : pbn_n_add_n_long(rp, ap, bp, n);
+}
+
+PBN_INLINE pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+    return n < PBN_ADDSUB_ASM_THRESHOLD ? pbn_n_sub_n_c(rp, ap, bp, n, 0) : pbn_n_sub_n_long(rp, ap, bp, n);
 }
 
 static pbn_limb pbn_n_add_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b) {
@@ -1238,19 +1251,15 @@ static pbn_limb pbn_submul_1_arm(pbn_limb *rp, const pbn_limb *ap, pbn_size k, p
 }
 #endif
 
-#ifndef PBN_ADDSUB_ASM_THRESHOLD
-#  define PBN_ADDSUB_ASM_THRESHOLD 8     /* limbs: below, the (inlined) C loop is just as fast */
-#endif
-
-static pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+static pbn_limb pbn_n_add_n_long(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
 #if defined(PBN_ASM_X86)
-    if (n >= PBN_ADDSUB_ASM_THRESHOLD) {
+    {
         pbn_size r = n & 3;
         pbn_limb cy = pbn_add_n_x86(rp, ap, bp, n >> 2, 0);
         return r ? pbn_n_add_n_c(rp + (n - r), ap + (n - r), bp + (n - r), r, cy) : cy;
     }
 #elif defined(PBN_ASM_ARM64)
-    if (n >= PBN_ADDSUB_ASM_THRESHOLD) {
+    {
         pbn_limb cy = pbn_add_n_arm(rp, ap, bp, n >> 1, 0);
         return (n & 1) ? pbn_n_add_n_c(rp + n - 1, ap + n - 1, bp + n - 1, 1, cy) : cy;
     }
@@ -1258,15 +1267,15 @@ static pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp
     return pbn_n_add_n_c(rp, ap, bp, n, 0);
 }
 
-static pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+static pbn_limb pbn_n_sub_n_long(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
 #if defined(PBN_ASM_X86)
-    if (n >= PBN_ADDSUB_ASM_THRESHOLD) {
+    {
         pbn_size r = n & 3;
         pbn_limb bw = pbn_sub_n_x86(rp, ap, bp, n >> 2, 0);
         return r ? pbn_n_sub_n_c(rp + (n - r), ap + (n - r), bp + (n - r), r, bw) : bw;
     }
 #elif defined(PBN_ASM_ARM64)
-    if (n >= PBN_ADDSUB_ASM_THRESHOLD) {
+    {
         pbn_limb bw = pbn_sub_n_arm(rp, ap, bp, n >> 1, 0);
         return (n & 1) ? pbn_n_sub_n_c(rp + n - 1, ap + n - 1, bp + n - 1, 1, bw) : bw;
     }
