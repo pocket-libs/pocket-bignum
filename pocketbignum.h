@@ -1896,7 +1896,8 @@ static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *
 
 /* ---- FFT multiplication (64-bit limbs): number-theoretic transforms modulo three primes
         p = c 2^k + 1 < 2^62, one limb per coefficient; every coefficient of the product is
-        below n 2^128 < p1 p2 p3 (~2^184), so the Chinese remainder theorem recovers it ---- */
+        below n 2^128 < p1 p2 p3 (~2^185.9), so the Chinese remainder theorem recovers it.
+        3 divides every c, so the lengths can be 2^k or 3 2^k (less padding) ---- */
 
 #if PBN_B == 64 && !defined(PBN_NO_FFT)
 #  define PBN_HAVE_FFT 1
@@ -1907,8 +1908,8 @@ static void pbn_n_sqr_n(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb *
 #    define PBN_SQR_FFT_THRESHOLD 7000
 #  endif
 
-static const pbn_limb pbn_ntt_p[3] = { 4179340454199820289u, 2485986994308513793u, 1945555039024054273u };
-static const pbn_limb pbn_ntt_g[3] = { 3, 5, 5 };   /* primitive roots: 29 2^57 + 1, 69 2^55 + 1, 27 2^56 + 1 */
+static const pbn_limb pbn_ntt_p[3] = { 4546383823830515713u, 4522739925786820609u, 4512606826625236993u };
+static const pbn_limb pbn_ntt_g[3] = { 10, 37, 7 };   /* primitive roots: 2019 2^51 + 1, 4017 2^50 + 1, 501 2^53 + 1 */
 
 /* branch-free reductions (values < 2^62: x - p is negative exactly when its top bit is set);
    data-dependent branches here would be mispredicted half the time */
@@ -1968,19 +1969,25 @@ static pbn_limb pbn_ntt_shoup_const(pbn_limb w, pbn_limb p) {
     return pbn_div_preinv(&r, w << s, 0, d, pbn_invert_limb(d));
 }
 
-/* tw[h + j] = w_{2h}^j (plain) and ts[h + j] its Shoup constant, for every stage
-   h = 1, 2, ..., L/2 and j < h; w the L-th root of unity given */
-static void pbn_ntt_twiddles(pbn_limb *tw, pbn_limb *ts, pbn_size L, pbn_limb w, const pbn_ntt_mod *m) {
+/* tw[j] = w^j (plain) and ts[j] its Shoup constant, for j < n */
+static void pbn_ntt_powers(pbn_limb *tw, pbn_limb *ts, pbn_size n, pbn_limb w, const pbn_ntt_mod *m) {
     /* powers of w in Montgomery form (wB mod p), one product each; from those, the plain
        value is a reduction, and floor(wB / p) = (wB - (wB mod p)) / p an exact division:
        -(wB mod p) / p mod B, with no division at all */
-    pbn_size h = L / 2, j;
+    pbn_size j;
     pbn_limb p = m->p, pinv = (pbn_limb)0 - m->ni, wm = pbn_ntt_mulmod(m, w, m->r1), x = m->r1;
-    for (j = 0; j < h; j++) {
-        tw[h + j] = pbn_ntt_mont(x, 1, p, m->ni);
-        ts[h + j] = ((pbn_limb)0 - x) * pinv;
+    for (j = 0; j < n; j++) {
+        tw[j] = pbn_ntt_mont(x, 1, p, m->ni);
+        ts[j] = ((pbn_limb)0 - x) * pinv;
         x = pbn_ntt_mont(x, wm, p, m->ni);
     }
+}
+
+/* tw[h + j] = w_{2h}^j (plain) and ts[h + j] its Shoup constant, for every stage
+   h = 1, 2, ..., L/2 and j < h; w the L-th root of unity given */
+static void pbn_ntt_twiddles(pbn_limb *tw, pbn_limb *ts, pbn_size L, pbn_limb w, const pbn_ntt_mod *m) {
+    pbn_size h = L / 2, j;
+    pbn_ntt_powers(tw + h, ts + h, h, w, m);
     for (h >>= 1; h >= 1; h >>= 1)
         for (j = 0; j < h; j++) {
             tw[h + j] = tw[2 * h + 2 * j];
@@ -2069,24 +2076,63 @@ static void pbn_ntt_inv(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_l
     for (h = 1; h < L; h <<= 1) pbn_ntt_inv_stage(a, L, h, tw, ts, p);
 }
 
+/* Length 3M: a radix-3 stage on top of three transforms of length M. With z a cube root
+   of unity (1 + z + z^2 = 0), u = z (x1 - x2) gives the three sums for one product:
+       x0 + x1 + x2,   x0 + z x1 + z^2 x2 = x0 - x2 + u,   x0 + z^2 x1 + z x2 = x0 - x1 - u
+   the last two then times w^i, w^2i (w the 3M-th root); values in [0, 2p) in & out */
+static void pbn_ntt_fwd3(pbn_limb *a, pbn_size M, const pbn_limb *t1, const pbn_limb *s1, const pbn_limb *t2,
+                         const pbn_limb *s2, pbn_limb z, pbn_limb zs, pbn_limb p) {
+    pbn_limb p2 = 2 * p, *b = a + M, *c = a + 2 * M;
+    pbn_size i;
+    for (i = 0; i < M; i++) {
+        pbn_limb x0 = a[i], x1 = b[i], x2 = c[i];
+        pbn_limb u = pbn_ntt_shoup(x1 - x2 + p2, z, zs, p);
+        pbn_limb y1 = pbn_ntt_fix(x0 - x2, p2), y2 = pbn_ntt_fix(x0 - x1, p2);
+        a[i] = pbn_ntt_fix(pbn_ntt_fix(x0 + x1 - p2, p2) + x2 - p2, p2);
+        b[i] = pbn_ntt_shoup(y1 + u, t1[i], s1[i], p);
+        c[i] = pbn_ntt_shoup(y2 + p2 - u, t2[i], s2[i], p);
+    }
+}
+
+/* its inverse (up to the factor 3): w^-i, w^-2i first, then the same sums with z^-1 */
+static void pbn_ntt_inv3(pbn_limb *a, pbn_size M, const pbn_limb *t1, const pbn_limb *s1, const pbn_limb *t2,
+                         const pbn_limb *s2, pbn_limb z, pbn_limb zs, pbn_limb p) {
+    pbn_limb p2 = 2 * p, *b = a + M, *c = a + 2 * M;
+    pbn_size i;
+    for (i = 0; i < M; i++) {
+        pbn_limb x0 = a[i], x1 = pbn_ntt_shoup(b[i], t1[i], s1[i], p), x2 = pbn_ntt_shoup(c[i], t2[i], s2[i], p);
+        pbn_limb u = pbn_ntt_shoup(x1 - x2 + p2, z, zs, p);
+        pbn_limb y1 = pbn_ntt_fix(x0 - x2, p2), y2 = pbn_ntt_fix(x0 - x1, p2);
+        a[i] = pbn_ntt_fix(pbn_ntt_fix(x0 + x1 - p2, p2) + x2 - p2, p2);
+        b[i] = pbn_ntt_fix(y1 + u - p2, p2);
+        c[i] = pbn_ntt_fix(y2 - u, p2);
+    }
+}
+
 /* rp[0..an+bn) = a * b (sq: b is a); an, bn >= 1 */
 static void pbn_n_mul_fft(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn, int sq) {
-    pbn_size cn = an + bn - 1, L = 1, k, i;
-    pbn_limb *buf, *fa, *fb, *tw, *ts, *iw, *is, *res[3], c0 = 0, c1 = 0, c2 = 0;
+    pbn_size cn = an + bn - 1, L = 1, M, k, i;
+    pbn_limb *buf, *fa, *fb, *tw, *ts, *iw, *is, *r3 = NULL, *res[3], c0 = 0, c1 = 0, c2 = 0;
     pbn_ntt_mod md[3];
     size_t total;
+    int three;
 
     while (L < cn) L <<= 1;
     if (L < 2) L = 2;
-    total = (size_t)6 * L + (size_t)3 * cn;
+    /* 3 2^k when that's enough: a quarter less (radix-3 tables: 8M = 2L/3 limbs) */
+    three = L >= 8 && 3 * (L / 4) >= cn;
+    if (three) L = 3 * (L / 4);
+    M = three ? L / 3 : L;
+    total = (size_t)2 * L + (size_t)4 * M + (three ? (size_t)8 * M : 0) + (size_t)3 * cn;
     buf = (pbn_limb *)pbn_alloc_fn(total * sizeof(pbn_limb));
     fa = buf;
     fb = fa + L;
     tw = fb + L;
-    ts = tw + L;
-    iw = ts + L;
-    is = iw + L;
-    res[0] = is + L;
+    ts = tw + M;
+    iw = ts + M;
+    is = iw + M;
+    res[0] = is + M;
+    if (three) { r3 = res[0]; res[0] = r3 + 8 * M; }
     res[1] = res[0] + cn;
     res[2] = res[1] + cn;
 
@@ -2094,15 +2140,34 @@ static void pbn_n_mul_fft(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const p
         const pbn_ntt_mod *m = &md[k];
         pbn_limb p, w, one, scale, scales, x;
         pbn_ntt_mod_init(&md[k], pbn_ntt_p[k]);
+        pbn_limb z = 0, zs = 0, zi = 0, zis = 0;
         p = m->p;
         w = pbn_ntt_powmod(m, pbn_ntt_g[k], (p - 1) / (pbn_limb)L);
-        pbn_ntt_twiddles(tw, ts, L, w, m);
+        if (three) {
+            /* w^i, w^2i, w^-i, w^-2i (i < M), and the cube roots z = w^M, 1/z = z^2 */
+            pbn_limb wi = pbn_ntt_powmod(m, w, L - 1);
+            pbn_ntt_powers(r3, r3 + M, M, w, m);
+            pbn_ntt_powers(r3 + 2 * M, r3 + 3 * M, M, pbn_ntt_mulmod(m, w, w), m);
+            pbn_ntt_powers(r3 + 4 * M, r3 + 5 * M, M, wi, m);
+            pbn_ntt_powers(r3 + 6 * M, r3 + 7 * M, M, pbn_ntt_mulmod(m, wi, wi), m);
+            z = pbn_ntt_powmod(m, w, M);
+            zs = pbn_ntt_shoup_const(z, p);
+            zi = pbn_ntt_mulmod(m, z, z);
+            zis = pbn_ntt_shoup_const(zi, p);
+            w = pbn_ntt_mulmod(m, pbn_ntt_mulmod(m, w, w), w);   /* the M-th root */
+        }
+        pbn_ntt_twiddles(tw, ts, M, w, m);
 
         /* the inputs, reduced into [0, 2p) (a Shoup product by 1) */
         one = pbn_ntt_shoup_const(1, p);
         for (i = 0; i < an; i++) fa[i] = pbn_ntt_shoup(ap[i], 1, one, p);
         for (; i < L; i++) fa[i] = 0;
-        pbn_ntt_fwd(fa, L, tw, ts, p);
+        if (three) {
+            pbn_ntt_fwd3(fa, M, r3, r3 + M, r3 + 2 * M, r3 + 3 * M, z, zs, p);
+            for (i = 0; i < 3; i++) pbn_ntt_fwd(fa + i * M, M, tw, ts, p);
+        } else {
+            pbn_ntt_fwd(fa, L, tw, ts, p);
+        }
         /* pointwise: Montgomery products (inputs < 2p < B / 2: results < p), each with an
            extra 1/B, taken back below */
         if (sq) {
@@ -2110,12 +2175,22 @@ static void pbn_n_mul_fft(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const p
         } else {
             for (i = 0; i < bn; i++) fb[i] = pbn_ntt_shoup(bp[i], 1, one, p);
             for (; i < L; i++) fb[i] = 0;
-            pbn_ntt_fwd(fb, L, tw, ts, p);
+            if (three) {
+                pbn_ntt_fwd3(fb, M, r3, r3 + M, r3 + 2 * M, r3 + 3 * M, z, zs, p);
+                for (i = 0; i < 3; i++) pbn_ntt_fwd(fb + i * M, M, tw, ts, p);
+            } else {
+                pbn_ntt_fwd(fb, L, tw, ts, p);
+            }
             for (i = 0; i < L; i++) fa[i] = pbn_ntt_mont(fa[i], fb[i], p, m->ni);
         }
         /* inverse: twiddles of the inverse root; then B / L (both factors at once) */
-        pbn_ntt_twiddles_inverse(iw, is, tw, ts, L, p);
-        pbn_ntt_inv(fa, L, iw, is, p);
+        pbn_ntt_twiddles_inverse(iw, is, tw, ts, M, p);
+        if (three) {
+            for (i = 0; i < 3; i++) pbn_ntt_inv(fa + i * M, M, iw, is, p);
+            pbn_ntt_inv3(fa, M, r3 + 4 * M, r3 + 5 * M, r3 + 6 * M, r3 + 7 * M, zi, zis, p);
+        } else {
+            pbn_ntt_inv(fa, L, iw, is, p);
+        }
         scale = pbn_ntt_mulmod(m, m->r1, pbn_ntt_powmod(m, (pbn_limb)L % p, p - 2));
         scales = pbn_ntt_shoup_const(scale, p);
         for (i = 0; i < cn; i++) {
