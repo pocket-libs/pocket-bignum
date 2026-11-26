@@ -6735,14 +6735,18 @@ static int pbf_set_scaled(pbf_ptr r, int sign, pbz_srcptr D, int base, long e10,
     return tern;
 }
 
+#define PBF_EXP_SATURATE ((long)PBF_EMAX + (long)(PBF_EMAX / 2))
+
 static long pbf_parse_exp(const char **pp, int *ok) {
     const char *p = *pp;
     int neg = 0;
     long v = 0;
     if (*p == '+' || *p == '-') { neg = *p == '-'; p++; }
     if (*p < '0' || *p > '9') { *ok = 0; return 0; }
+    /* saturated well past the exponent range (but within a 32-bit long, as on Windows):
+       anything that big is an overflow / underflow anyway */
     while (*p >= '0' && *p <= '9') {
-        if (v < LONG_MAX / 16) v = v * 10 + (*p - '0');
+        v = v <= (PBF_EXP_SATURATE - 9) / 10 ? v * 10 + (*p - '0') : PBF_EXP_SATURATE;
         p++;
     }
     *pp = p;
