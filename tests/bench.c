@@ -28,13 +28,15 @@ static void rand_pair(pbz_ptr x, mpz_ptr g, long limbs) {
 }
 
 #define MIN_TIME 0.15
+/* keeps the compiler from hoisting a cheap, inlined statement out of the timing loop */
+#define BARRIER() __asm__ __volatile__("" ::: "memory")
 
 #define BENCH(label, n, PBN_STMT, GMP_STMT) do {                                   \
     double t0, tp, tg; long it, reps = 1;                                           \
-    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { PBN_STMT; }              \
+    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { PBN_STMT; BARRIER(); }   \
                tp = now() - t0; if (tp > MIN_TIME) break; reps *= 2; }              \
     tp /= reps; reps = 1;                                                           \
-    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { GMP_STMT; }              \
+    for (;;) { t0 = now(); for (it = 0; it < reps; it++) { GMP_STMT; BARRIER(); }   \
                tg = now() - t0; if (tg > MIN_TIME) break; reps *= 2; }              \
     tg /= reps;                                                                     \
     printf("%-14s %8ld %12.1f %12.1f   %5.2fx\n", label, (long)(n), tp * 1e9, tg * 1e9, tp / tg); \
