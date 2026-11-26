@@ -1412,12 +1412,28 @@ static void pbn_n_tdiv_qr_basecase(pbn_limb *qp, pbn_limb *rp, const pbn_limb *n
 
 /* ---- multiplication ---- */
 
+/* With the x86-64 kernels (BMI2 & ADX), from this many limbs on, the schoolbook rows go
+   one at a time through addmul_1 (faster there than two at a time with the C addmul_2) */
+#ifndef PBN_MUL_ASM_ROWS
+#  define PBN_MUL_ASM_ROWS 12
+#endif
+
+PBN_INLINE int pbn_asm_rows(pbn_size n) {
+#if defined(PBN_ASM_X86)
+    return n >= PBN_MUL_ASM_ROWS && pbn_cpu_adx();
+#else                                   /* (on arm64, the C addmul_2 is faster) */
+    (void)n;
+    return 0;
+#endif
+}
+
 static void pbn_n_mul_basecase(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn) {
     pbn_size i = 1;
     rp[an] = pbn_n_mul_1(rp, ap, an, bp[0]);
 #if defined(PBN_HAVE_ADDMUL_2)
-    for (; i + 2 <= bn; i += 2)
-        rp[an + i + 1] = pbn_n_addmul_2(rp + i, ap, an, bp[i], bp[i + 1]);
+    if (!pbn_asm_rows(an))
+        for (; i + 2 <= bn; i += 2)
+            rp[an + i + 1] = pbn_n_addmul_2(rp + i, ap, an, bp[i], bp[i + 1]);
 #endif
     for (; i < bn; i++)
         rp[an + i] = pbn_n_addmul_1(rp + i, ap, an, bp[i]);
