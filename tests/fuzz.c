@@ -693,6 +693,117 @@ static void t_edge(void) {
 
 /* ---------------------------------------------------------------- main */
 
+static void t_more(void) {
+    /* the functions added for completeness */
+    pbz_t a, b, c, r, s, t; mpz_t ga, gb, gc, e, es, et;
+    int save = maxlimbs;
+    unsigned long u, n;
+    pbz_inits(a, b, c, r, s, t, NULL); mpz_inits(ga, gb, gc, e, es, et, NULL);
+    maxlimbs = 6;
+    gen(a, ga); gen(b, gb); gen(c, gc);
+    u = gen_ul();
+    set_ctx(3, ga, gb, gc);
+    cur_ul = u;
+
+    cur_op = "scan0"; n = rndn(64 * 8); check_int(cur_op, (int)(pbz_scan0(a, n) == mpz_scan0(ga, n)), 1);
+    cur_op = "scan1"; check_int(cur_op, (int)(pbz_scan1(a, n) == mpz_scan1(ga, n)), 1);
+    cur_op = "hamdist"; check_int(cur_op, (int)(pbz_hamdist(a, b) == mpz_hamdist(ga, gb)), 1);
+    cur_op = "divisible_2exp_p"; check_int(cur_op, pbz_divisible_2exp_p(a, n % 200), mpz_divisible_2exp_p(ga, n % 200) != 0);
+    {
+        /* c = a + k*b, so congruences hold now and then */
+        mpz_t k; mpz_init_set_ui(k, rndn(5)); mpz_addmul(gc, k, gb); if (rndn(2)) mpz_set(gc, ga); mpz_addmul(gc, k, gb); mpz_clear(k);
+        from_gmp(c, gc);
+    }
+    cur_op = "congruent_p"; check_int(cur_op, pbz_congruent_p(a, c, b) != 0, mpz_congruent_p(ga, gc, gb) != 0);
+    cur_op = "congruent_ui_p"; check_int(cur_op, pbz_congruent_ui_p(a, u % 1000, u % 37), mpz_congruent_ui_p(ga, u % 1000, u % 37) != 0);
+    cur_op = "congruent_2exp_p"; check_int(cur_op, pbz_congruent_2exp_p(a, c, n % 200), mpz_congruent_2exp_p(ga, gc, n % 200) != 0);
+
+    {
+        /* remove: a times a power of a small f */
+        long f = (long)rndn(30) + 2; unsigned long k = rndn(6), i;
+        mpz_t gf; pbz_t pf;
+        if (rndn(3) == 0) f = -f;
+        mpz_init_set_si(gf, f); pbz_init(pf); from_gmp(pf, gf);
+        for (i = 0; i < k; i++) mpz_mul(ga, ga, gf);
+        from_gmp(a, ga);
+        cur_op = "remove";
+        check_int(cur_op, (int)pbz_remove(r, a, pf), (int)mpz_remove(e, ga, gf)); check(cur_op, r, e);
+        pbz_set(r, a); pbz_remove(r, r, pf); check("remove alias", r, e);
+        mpz_clear(gf); pbz_clear(pf);
+    }
+
+    {
+        unsigned long k = 1 + rndn(9);
+        mpz_abs(gb, gb);
+        if (rndn(3) == 0) mpz_pow_ui(gb, gb, k);            /* exact roots */
+        if (rndn(4) == 0 && (k & 1)) mpz_neg(gb, gb);
+        from_gmp(b, gb);
+        set_ctx(1, gb); cur_ul = k;
+        cur_op = "root"; check_int(cur_op, pbz_root(r, b, k) != 0, mpz_root(e, gb, k) != 0); check(cur_op, r, e);
+        cur_op = "rootrem"; pbz_rootrem(r, s, b, k); mpz_rootrem(e, es, gb, k); check(cur_op, r, e); check(cur_op, s, es);
+        cur_op = "perfect_power_p";
+        if (mpz_sizeinbase(gb, 2) < 200) check_int(cur_op, pbz_perfect_power_p(b) != 0, mpz_perfect_power_p(gb) != 0);
+    }
+
+    {
+        unsigned long k = rndn(60), m = rndn(200);
+        mpz_set_si(gb, (long)rndn(200) - 60);
+        from_gmp(b, gb); set_ctx(1, gb); cur_ul = k;
+        cur_op = "bin_ui"; pbz_bin_ui(r, b, k); mpz_bin_ui(e, gb, k); check(cur_op, r, e);
+        cur_op = "bin_uiui"; pbz_bin_uiui(r, m, k); mpz_bin_uiui(e, m, k); check(cur_op, r, e);
+        cur_ul = m;
+        cur_op = "fib_ui"; pbz_fib_ui(r, m * 7); mpz_fib_ui(e, m * 7); check(cur_op, r, e);
+        cur_op = "fib2_ui"; pbz_fib2_ui(r, s, m); mpz_fib2_ui(e, es, m); check(cur_op, r, e); check(cur_op, s, es);
+        cur_op = "lucnum_ui"; pbz_lucnum_ui(r, m); mpz_lucnum_ui(e, m); check(cur_op, r, e);
+        cur_op = "lucnum2_ui"; pbz_lucnum2_ui(r, s, m); mpz_lucnum2_ui(e, es, m); check(cur_op, r, e); check(cur_op, s, es);
+        cur_op = "2fac_ui"; pbz_2fac_ui(r, m); mpz_2fac_ui(e, m); check(cur_op, r, e);
+        cur_op = "mfac_uiui"; pbz_mfac_uiui(r, m, k + 1); mpz_mfac_uiui(e, m, k + 1); check(cur_op, r, e);
+        cur_op = "primorial_ui"; pbz_primorial_ui(r, m * 3); mpz_primorial_ui(e, m * 3); check(cur_op, r, e);
+    }
+
+    gen(a, ga); gen(b, gb);
+    if (rndn(4) == 0) mpz_set_ui(gb, 0);
+    if (rndn(6) == 0) mpz_set(gb, ga);
+    if (rndn(6) == 0) mpz_neg(gb, ga);
+    if (rndn(8) == 0) mpz_mul_2exp(gb, ga, 1);
+    from_gmp(b, gb); set_ctx(2, ga, gb);
+    cur_op = "gcdext";
+    pbz_gcdext(r, s, t, a, b); mpz_gcdext(e, es, et, ga, gb);
+    check(cur_op, r, e); check("gcdext s", s, es); check("gcdext t", t, et);
+    pbz_gcdext(r, s, NULL, a, b); check("gcdext t=NULL", s, es);
+
+    cur_op = "kronecker"; check_int(cur_op, pbz_kronecker(a, b), mpz_kronecker(ga, gb));
+    {
+        long sl = (long)gen_ul(); unsigned long ul = gen_ul() >> rndn(64);
+        cur_op = "kronecker_si"; check_int(cur_op, pbz_kronecker_si(a, sl), mpz_kronecker_si(ga, sl));
+        cur_op = "kronecker_ui"; check_int(cur_op, pbz_kronecker_ui(a, ul), mpz_kronecker_ui(ga, ul));
+        cur_op = "si_kronecker"; check_int(cur_op, pbz_si_kronecker(sl, b), mpz_si_kronecker(sl, gb));
+        cur_op = "ui_kronecker"; check_int(cur_op, pbz_ui_kronecker(ul, b), mpz_ui_kronecker(ul, gb));
+    }
+    if (mpz_odd_p(gb) && mpz_sgn(gb) > 0) { cur_op = "jacobi"; check_int(cur_op, pbz_jacobi(a, b), mpz_jacobi(ga, gb)); }
+
+    {
+        long ex1, ex2; double d1, d2;
+        cur_op = "get_d_2exp"; d1 = pbz_get_d_2exp(&ex1, a); d2 = mpz_get_d_2exp(&ex2, ga);
+        check_int(cur_op, d1 == d2 && ex1 == ex2, 1);
+    }
+    if (mpz_sgn(gb) != 0) {
+        pbq_t q; mpq_t gq;
+        pbq_init(q); mpq_init(gq);
+        mpq_set_num(gq, ga); mpq_set_den(gq, gb); mpq_canonicalize(gq);
+        pbz_set(pbq_numref(q), a); pbz_set(pbq_denref(q), b); pbq_canonicalize(q);
+        cur_op = "set_q"; pbz_set_q(r, q); mpz_set_q(e, gq); check(cur_op, r, e);
+        pbq_clear(q); mpq_clear(gq);
+    }
+    if (mpz_sizeinbase(ga, 2) < 120) {
+        mpz_abs(ga, ga); from_gmp(a, ga); set_ctx(1, ga);
+        cur_op = "prevprime";
+        if (mpz_cmp_ui(ga, 2) > 0) { check_int(cur_op, pbz_prevprime(r, a) > 0, mpz_prevprime(e, ga) > 0); check(cur_op, r, e); }
+    }
+    maxlimbs = save;
+    pbz_clears(a, b, c, r, s, t, NULL); mpz_clears(ga, gb, gc, e, es, et, NULL);
+}
+
 int main(int argc, char **argv) {
     unsigned long iters = argc > 1 ? strtoul(argv[1], NULL, 10) : 20000;
     unsigned long long seed = argc > 2 ? strtoull(argv[2], NULL, 10) : 0x1234567ull;
@@ -721,6 +832,7 @@ int main(int argc, char **argv) {
         if (it % 4 == 1) t_prime();
         if (it % 10 == 0) t_fac();
         if (it % 8 == 3) t_big_mul();
+        if (it % 4 == 2) t_more();
         if ((it + 1) % 5000 == 0) { printf("  %lu iterations, %llu checks ok\n", it + 1, checks); fflush(stdout); }
     }
     printf("OK: %llu checks passed\n", checks);
