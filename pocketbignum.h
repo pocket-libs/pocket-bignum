@@ -2150,6 +2150,49 @@ PBN_INLINE void pbn_ntt_inv_stage(pbn_limb *a, pbn_size L, pbn_size h, const pbn
     }
 }
 
+/* two stages at once (h, then h/2), each element loaded & stored once for both: the
+   same butterflies as two calls of the ones above, a pass over memory fewer */
+PBN_INLINE void pbn_ntt_fwd_stage2(pbn_limb *a, pbn_size L, pbn_size h, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_limb p2 = 2 * p;
+    pbn_size q = h / 2, s, j;
+    const pbn_limb *th = tw + h, *sh = ts + h, *tq = tw + q, *sq = ts + q;
+    for (s = 0; s < L; s += 2 * h) {
+        pbn_limb *x0 = a + s, *x1 = x0 + q, *x2 = x0 + h, *x3 = x2 + q;
+        for (j = 0; j < q; j++) {
+            pbn_limb u0 = x0[j], u1 = x1[j], u2 = x2[j], u3 = x3[j], y0, y1, y2, y3;
+            y0 = pbn_ntt_fix(u0 + u2 - p2, p2);
+            y2 = pbn_ntt_shoup(u0 - u2 + p2, th[j], sh[j], p);
+            y1 = pbn_ntt_fix(u1 + u3 - p2, p2);
+            y3 = pbn_ntt_shoup(u1 - u3 + p2, th[j + q], sh[j + q], p);
+            x0[j] = pbn_ntt_fix(y0 + y1 - p2, p2);
+            x1[j] = pbn_ntt_shoup(y0 - y1 + p2, tq[j], sq[j], p);
+            x2[j] = pbn_ntt_fix(y2 + y3 - p2, p2);
+            x3[j] = pbn_ntt_shoup(y2 - y3 + p2, tq[j], sq[j], p);
+        }
+    }
+}
+
+/* the same for the inverse: stages h, then 2h */
+PBN_INLINE void pbn_ntt_inv_stage2(pbn_limb *a, pbn_size L, pbn_size h, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
+    pbn_limb p2 = 2 * p;
+    pbn_size s, j;
+    const pbn_limb *th = tw + h, *sh = ts + h, *t2 = tw + 2 * h, *s2 = ts + 2 * h;
+    for (s = 0; s < L; s += 4 * h) {
+        pbn_limb *x0 = a + s, *x1 = x0 + h, *x2 = x0 + 2 * h, *x3 = x2 + h;
+        for (j = 0; j < h; j++) {
+            pbn_limb u0 = x0[j], v1 = pbn_ntt_shoup(x1[j], th[j], sh[j], p);
+            pbn_limb u2 = x2[j], v3 = pbn_ntt_shoup(x3[j], th[j], sh[j], p);
+            pbn_limb y0 = pbn_ntt_fix(u0 + v1 - p2, p2), y1 = pbn_ntt_fix(u0 - v1, p2);
+            pbn_limb y2 = pbn_ntt_fix(u2 + v3 - p2, p2), y3 = pbn_ntt_fix(u2 - v3, p2);
+            pbn_limb w2 = pbn_ntt_shoup(y2, t2[j], s2[j], p), w3 = pbn_ntt_shoup(y3, t2[j + h], s2[j + h], p);
+            x0[j] = pbn_ntt_fix(y0 + w2 - p2, p2);
+            x2[j] = pbn_ntt_fix(y0 - w2, p2);
+            x1[j] = pbn_ntt_fix(y1 + w3 - p2, p2);
+            x3[j] = pbn_ntt_fix(y1 - w3, p2);
+        }
+    }
+}
+
 /* forward transform (decimation in frequency: natural order in, bit-reversed out);
    tw[h + j] only depends on the stage, so the halves use the same table */
 static void pbn_ntt_fwd(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_limb *ts, pbn_limb p) {
@@ -2160,7 +2203,8 @@ static void pbn_ntt_fwd(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_l
         pbn_ntt_fwd(a + L / 2, L / 2, tw, ts, p);
         return;
     }
-    for (h = L / 2; h >= 1; h >>= 1) pbn_ntt_fwd_stage(a, L, h, tw, ts, p);
+    for (h = L / 2; h >= 2; h >>= 2) pbn_ntt_fwd_stage2(a, L, h, tw, ts, p);
+    if (h == 1) pbn_ntt_fwd_stage(a, L, 1, tw, ts, p);
 }
 
 /* inverse transform without the 1/L (decimation in time: bit-reversed in, natural out),
@@ -2173,7 +2217,8 @@ static void pbn_ntt_inv(pbn_limb *a, pbn_size L, const pbn_limb *tw, const pbn_l
         pbn_ntt_inv_stage(a, L, L / 2, tw, ts, p);
         return;
     }
-    for (h = 1; h < L; h <<= 1) pbn_ntt_inv_stage(a, L, h, tw, ts, p);
+    for (h = 1; 2 * h < L; h <<= 2) pbn_ntt_inv_stage2(a, L, h, tw, ts, p);
+    if (h < L) pbn_ntt_inv_stage(a, L, h, tw, ts, p);
 }
 
 /* Length 3M: a radix-3 stage on top of three transforms of length M. With z a cube root
@@ -6757,14 +6802,18 @@ static int pbf_set_scaled(pbf_ptr r, int sign, pbz_srcptr D, int base, long e10,
     return tern;
 }
 
+#define PBF_EXP_SATURATE ((long)PBF_EMAX + (long)(PBF_EMAX / 2))
+
 static long pbf_parse_exp(const char **pp, int *ok) {
     const char *p = *pp;
     int neg = 0;
     long v = 0;
     if (*p == '+' || *p == '-') { neg = *p == '-'; p++; }
     if (*p < '0' || *p > '9') { *ok = 0; return 0; }
+    /* saturated well past the exponent range (but within a 32-bit long, as on Windows):
+       anything that big is an overflow / underflow anyway */
     while (*p >= '0' && *p <= '9') {
-        if (v < LONG_MAX / 16) v = v * 10 + (*p - '0');
+        v = v <= (PBF_EXP_SATURATE - 9) / 10 ? v * 10 + (*p - '0') : PBF_EXP_SATURATE;
         p++;
     }
     *pp = p;

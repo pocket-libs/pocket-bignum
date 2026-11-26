@@ -6,7 +6,7 @@
     <b>Small, fast & portable<br>arbitrary-precision arithmetic, in a single C header</b>
     <br><br>
     <img src="https://img.shields.io/github/license/pocket-libs/pocket-bignum?style=for-the-badge">
-    <img src="https://img.shields.io/badge/language-C99-555555.svg?style=for-the-badge" alt="Language"/>
+    <img src="https://img.shields.io/badge/language-C-6489E2.svg?style=for-the-badge" alt="Language"/>
     <a href="https://github.com/pocket-libs/pocket-bignum/actions/workflows/ci.yml" style="text-decoration: none; display: inline-block;"><img src="https://img.shields.io/github/actions/workflow/status/pocket-libs/pocket-bignum/ci.yml?branch=main&label=tests&style=for-the-badge" alt="Tests"/></a>
 </p>
 
