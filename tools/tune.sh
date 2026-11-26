@@ -13,20 +13,13 @@ mkdir -p build/tune
 
 # name | op | threshold | candidates (current first) | sizes | extra flags
 EXPERIMENTS='
-kara     | mul     | PBN_MUL_KARA_THRESHOLD    | 28 16 20 24 32 40                 | 24 32 40 48 64 80
-toom3    | mul     | PBN_MUL_TOOM3_THRESHOLD   | 100 60 70 80 120 150              | 70 90 110 130 160 200 250
-toom4    | mul     | PBN_MUL_TOOM4_THRESHOLD   | 300 150 200 250 400 500           | 200 250 300 400 500 700 1000
-sqrkara  | sqr     | PBN_SQR_KARA_THRESHOLD    | 40 24 32 48 56                    | 32 40 48 64 80 100
-sqrtoom3 | sqr     | PBN_SQR_TOOM3_THRESHOLD   | 160 100 120 140 200 250           | 120 140 160 200 250 300
-sqrtoom4 | sqr     | PBN_SQR_TOOM4_THRESHOLD   | 400 250 300 350 500 600           | 300 400 500 600 800 1000
-fft      | mul     | PBN_MUL_FFT_THRESHOLD     | 7000 1500 2000 2500 3000 4000 5000 | 1500 2000 2500 3000 4000 5000 6000 7000 9000 12000
-sqrfft   | sqr     | PBN_SQR_FFT_THRESHOLD     | 7000 1500 2000 2500 3000 4000 5000 | 1500 2000 2500 3000 4000 5000 6000 7000 9000 12000
-dcdiv    | div     | PBN_DC_DIV_THRESHOLD      | 70 30 40 50 60 90 120             | 40 60 80 100 150 200 300
-lehmer2  | gcd     | PBN_GCD_LEHMER2_THRESHOLD | 100 20 40 60 150 200              | 30 60 100 150 200 300
-hgcd     | gcd     | PBN_GCD_HGCD_THRESHOLD    | 1000 300 500 700 1500 2000        | 400 700 1000 1500 2000 3000 5000
-hgcdin   | gcd     | PBN_HGCD_THRESHOLD        | 100 40 60 80 150 200              | 1500 3000 6000
-getstr   | get_str | PBN_GET_STR_DC_THRESHOLD  | 32 16 24 48 64 96                 | 32 48 64 96 128 256 512
-setstr   | set_str | PBN_SET_STR_DC_THRESHOLD  | 128 32 64 96 192 256              | 64 128 192 256 512 1024
+toom3    | mul     | PBN_MUL_TOOM3_THRESHOLD   | 100 120 130 150 180               | 90 110 130 150 170 200 250
+toom4    | mul     | PBN_MUL_TOOM4_THRESHOLD   | 300 200 225 250 275               | 180 220 260 300 400 600 1000
+lehmer2  | gcd     | PBN_GCD_LEHMER2_THRESHOLD | 100 150 200 300 400               | 80 120 160 200 300 400 600
+hgcd     | gcd     | PBN_GCD_HGCD_THRESHOLD    | 1000 200 300 400 500              | 250 350 500 700 1000 1500 3000
+hgcdin   | gcd     | PBN_HGCD_THRESHOLD        | 100 20 30 40 60                   | 1500 3000 6000
+getstr   | get_str | PBN_GET_STR_DC_THRESHOLD  | 32 12 16 20 24                    | 16 24 32 48 64 128 512
+setstr   | set_str | PBN_SET_STR_DC_THRESHOLD  | 128 160 192 256 384               | 128 192 256 384 512 1024
 '
 
 echo "$EXPERIMENTS" | while IFS='|' read -r name op thr cands sizes extra; do
