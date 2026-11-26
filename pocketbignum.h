@@ -7774,9 +7774,12 @@ PBN_DEF int pbf_ui_sub(pbf_ptr r, unsigned long a, pbf_srcptr b, pbf_rnd_t rnd) 
     return pbf_add_v(r, pbf_view_z(t), pbf_view_neg(pbf_view_of(b)), rnd, 1);
 }
 PBN_DEF int pbf_si_sub(pbf_ptr r, long a, pbf_srcptr b, pbf_rnd_t rnd) {
-    PBZ_TMP_SL(t, a);
-    if (a == 0) return pbf_neg(r, b, rnd);
-    return pbf_add_v(r, pbf_view_z(t), pbf_view_neg(pbf_view_of(b)), rnd, 1);
+    int t;
+    if (a >= 0) return pbf_ui_sub(r, (unsigned long)a, b, rnd);
+    /* -(b + |a|), rounded the other way: like MPFR (an exact 0 comes out as -0) */
+    t = pbf_add_ui(r, b, 0UL - (unsigned long)a, rnd == PBF_RNDU ? PBF_RNDD : rnd == PBF_RNDD ? PBF_RNDU : rnd);
+    FSIGN(r) = -FSIGN(r);
+    return -t;
 }
 PBN_DEF int pbf_mul_ui(pbf_ptr r, pbf_srcptr a, unsigned long b, pbf_rnd_t rnd) { PBZ_TMP_UL(t, b); return pbf_mul_z(r, a, t, rnd); }
 PBN_DEF int pbf_mul_si(pbf_ptr r, pbf_srcptr a, long b, pbf_rnd_t rnd) { PBZ_TMP_SL(t, b); return pbf_mul_z(r, a, t, rnd); }
