@@ -2672,11 +2672,17 @@ static pbn_limb pbn_big_base(int base, int *k) {
 #  define PBN_SET_STR_DC_THRESHOLD 128    /* limbs (worth of digits) */
 #endif
 
-/* powers of the "big base" bb = base^k: pw[i] = bb^(2^i), worth k*2^i digits */
+/* powers of the "big base" bb = base^k: pw[i] = bb^(2^i), worth k*2^i digits. They're kept
+   without their low zero limbs (of which an even base has plenty: 10^k = 2^k 5^k), so
+   pw[i] = {p[i], n[i]} * B^z[i], and dividing or multiplying by it works on fewer limbs */
 typedef struct {
     pbn_limb *p[64];
-    pbn_size  n[64];
+    pbn_size  n[64];       /* limbs, without the zero ones */
+    pbn_size  z[64];       /* low zero limbs */
+    pbn_size  full[64];    /* n + z */
     size_t    digits[64];
+    pbn_limb *mem[64];     /* allocations (p[i] points into them) */
+    pbn_size  memn[64];
     int       count;
     pbn_limb  b0;          /* storage for p[0] (no allocation for small numbers) */
 } pbn_powtab;
@@ -2686,15 +2692,23 @@ static void pbn_powtab_init(pbn_powtab *t, pbn_limb bb, int k, pbn_size maxn) {
     t->b0 = bb;
     t->p[0] = &t->b0;
     t->n[0] = 1;
+    t->z[0] = 0;
+    t->full[0] = 1;
     t->digits[0] = (size_t)k;
     t->count = 1;
-    while (t->count < 64 && 2 * t->n[t->count - 1] <= maxn + 1) {
+    while (t->count < 64 && 2 * t->full[t->count - 1] <= maxn + 1) {
         int i = t->count;
-        pbn_size n = 2 * t->n[i - 1];
-        t->p[i] = PBN_TMP_ALLOC(n);
-        pbn_n_sqr(t->p[i], t->p[i - 1], t->n[i - 1]);
-        PBN_NORM(t->p[i], n);
+        pbn_size n = 2 * t->n[i - 1], z = 2 * t->z[i - 1];
+        pbn_limb *p = PBN_TMP_ALLOC(n);
+        t->mem[i] = p;
+        t->memn[i] = n;
+        pbn_n_sqr(p, t->p[i - 1], t->n[i - 1]);
+        PBN_NORM(p, n);
+        while (p[0] == 0) { p++; n--; z++; }
+        t->p[i] = p;
         t->n[i] = n;
+        t->z[i] = z;
+        t->full[i] = n + z;
         t->digits[i] = 2 * t->digits[i - 1];
         t->count++;
     }
@@ -2702,7 +2716,7 @@ static void pbn_powtab_init(pbn_powtab *t, pbn_limb bb, int k, pbn_size maxn) {
 
 static void pbn_powtab_clear(pbn_powtab *t) {
     int i;
-    for (i = 1; i < t->count; i++) PBN_TMP_FREE(t->p[i], 2 * t->n[i - 1]);
+    for (i = 1; i < t->count; i++) PBN_TMP_FREE(t->mem[i], t->memn[i]);
 }
 
 /* writes exactly nd digits of {np, nn} (zero-padded; the number must fit) into out;
@@ -2737,8 +2751,8 @@ static void pbn_get_str_rec(char *out, size_t nd, pbn_limb *np, pbn_size nn, con
         int i = t->count - 1;
         pbn_size qn, rn;
         pbn_limb *qp, *rp;
-        while (i > 0 && (2 * t->n[i] > nn + 1 || t->digits[i] >= nd)) i--;
-        rn = t->n[i];
+        while (i > 0 && (2 * t->full[i] > nn + 1 || t->digits[i] >= nd)) i--;
+        rn = t->full[i];
         if (nn < rn) {
             pbn_get_str_rec(out + nd - t->digits[i], t->digits[i], np, nn, t, base, digs);
             memset(out, '0', nd - t->digits[i]);
@@ -2747,7 +2761,9 @@ static void pbn_get_str_rec(char *out, size_t nd, pbn_limb *np, pbn_size nn, con
         qn = nn - rn + 1;
         qp = PBN_TMP_ALLOC(qn + rn);
         rp = qp + qn;
-        pbn_n_tdiv_qr(qp, rp, np, nn, t->p[i], rn);
+        /* n = (nh B^z + nl) by p B^z: q = nh / p, and the remainder is (nh mod p) B^z + nl */
+        pbn_n_tdiv_qr(qp, rp + t->z[i], np + t->z[i], nn - t->z[i], t->p[i], t->n[i]);
+        pbn_n_copy(rp, np, t->z[i]);
         pbn_get_str_rec(out, nd - t->digits[i], qp, qn, t, base, digs);
         pbn_get_str_rec(out + nd - t->digits[i], t->digits[i], rp, rn, t, base, digs);
         PBN_TMP_FREE(qp, qn + rn);
@@ -2799,10 +2815,11 @@ static pbn_size pbn_set_str_rec(pbn_limb *rp, const unsigned char *dv, size_t nd
             pbn_n_copy(rp, lp, ln);
             rn = ln;
         } else {
-            pbn_size pn = t->n[i];
-            if (hn >= pn) pbn_n_mul(rp, hp, hn, t->p[i], pn);
-            else          pbn_n_mul(rp, t->p[i], pn, hp, hn);
-            rn = hn + pn;
+            pbn_size pn = t->n[i], z = t->z[i];
+            if (hn >= pn) pbn_n_mul(rp + z, hp, hn, t->p[i], pn);
+            else          pbn_n_mul(rp + z, t->p[i], pn, hp, hn);
+            pbn_n_zero(rp, z);
+            rn = hn + pn + z;
             if (ln) pbn_n_add(rp, rp, rn, lp, ln);
             PBN_NORM(rp, rn);
         }
