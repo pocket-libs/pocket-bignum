@@ -421,6 +421,12 @@ extern "C" {
 /* thresholds that differ by CPU (tools/tune.sh); the rest are further down, all of them
    overridable with -D */
 #if defined(__aarch64__) || defined(_M_ARM64)
+#  ifndef PBN_MUL_FFT_THRESHOLD
+#    define PBN_MUL_FFT_THRESHOLD 3000
+#  endif
+#  ifndef PBN_SQR_FFT_THRESHOLD
+#    define PBN_SQR_FFT_THRESHOLD 3000
+#  endif
 #  ifndef PBN_GCD_LEHMER2_THRESHOLD
 #    define PBN_GCD_LEHMER2_THRESHOLD 300
 #  endif
@@ -428,6 +434,12 @@ extern "C" {
 #    define PBN_GCD_HGCD_THRESHOLD 200
 #  endif
 #elif defined(__x86_64__) || defined(_M_X64)
+#  ifndef PBN_MUL_FFT_THRESHOLD
+#    define PBN_MUL_FFT_THRESHOLD 5500     /* (from 3500 on, the FFT is faster at some sizes, slower at others) */
+#  endif
+#  ifndef PBN_SQR_FFT_THRESHOLD
+#    define PBN_SQR_FFT_THRESHOLD 5500
+#  endif
 #  ifndef PBN_GCD_HGCD_THRESHOLD
 #    define PBN_GCD_HGCD_THRESHOLD 400
 #  endif
