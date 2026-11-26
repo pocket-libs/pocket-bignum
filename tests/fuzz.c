@@ -538,6 +538,44 @@ static void t_pow(void) {
     cur_ul = u;
     cur_op = "powm_ui"; pbz_powm_ui(r, a, u, m); mpz_powm_ui(e, ga, u, gm); check(cur_op, r, e);
 
+    /* powm with odd moduli of 1-2 limbs (a code path of their own): moduli close to
+       B or B^2 too, and bases close to the modulus */
+    {
+        pbz_t a2, m2; mpz_t ga2, gm2;
+        pbz_inits(a2, m2, NULL); mpz_inits(ga2, gm2, NULL);
+        maxlimbs = 2;
+        gen_nonzero(m2, gm2);
+        mpz_abs(gm2, gm2);
+        if (rndn(3) == 0) {
+            mpz_set_ui(gm2, 0);
+            mpz_setbit(gm2, PBN_LIMB_BITS * (1 + rndn(2)));
+            mpz_sub_ui(gm2, gm2, 1 + 2 * rndn(4));
+        }
+        mpz_setbit(gm2, 0);
+        if (mpz_cmp_ui(gm2, 1) > 0) {
+            if (rndn(2)) mpz_neg(gm2, gm2);
+            switch (rndn(4)) {
+                case 0:  gen(a2, ga2); break;
+                case 1:  mpz_abs(ga2, gm2); mpz_sub_ui(ga2, ga2, 1 + rndn(3)); break;
+                case 2:  mpz_abs(ga2, gm2); mpz_sub_ui(ga2, ga2, 1); mpz_neg(ga2, ga2); break;
+                default: gen(a2, ga2); mpz_mul(ga2, ga2, gm2); mpz_add_ui(ga2, ga2, rndn(5)); break;
+            }
+            from_gmp(a2, ga2);
+            from_gmp(m2, gm2);
+            mpz_abs(gb, gb);
+            if (mpz_sgn(gb) == 0) mpz_set_ui(gb, 1 + rndn(1000));
+            from_gmp(b, gb);
+            set_ctx(3, ga2, gb, gm2);
+            cur_op = "powm (small m)";
+            mpz_powm(e, ga2, gb, gm2);
+            pbz_powm(r, a2, b, m2); check(cur_op, r, e);
+            pbz_set(r, a2); pbz_powm(r, r, b, m2); check("powm (small m) r=b", r, e);
+            pbz_set(r, m2); pbz_powm(r, a2, b, r); check("powm (small m) r=m", r, e);
+        }
+        pbz_clears(a2, m2, NULL); mpz_clears(ga2, gm2, NULL);
+        maxlimbs = save > 24 ? 24 : save;
+    }
+
     /* invert */
     cur_op = "invert";
     {
