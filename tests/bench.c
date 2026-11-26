@@ -83,6 +83,13 @@ int main(int argc, char **argv) {
         rand_pair(a, ga, 2 * n); rand_pair(b, gb, n);
         BENCH("tdiv_qr 2n/n", n, pbz_tdiv_qr(c, d, a, b), mpz_tdiv_qr(gc, gd, ga, gb));
     }
+    /* a quotient much shorter than the divisor */
+    rand_pair(a, ga, 2300); rand_pair(b, gb, 2000);
+    BENCH("tdiv_qr +300/n", 2000, pbz_tdiv_qr(c, d, a, b), mpz_tdiv_qr(gc, gd, ga, gb));
+    if (!quick) {
+        rand_pair(a, ga, 10500); rand_pair(b, gb, 10000);
+        BENCH("tdiv_qr +500/n", 10000, pbz_tdiv_qr(c, d, a, b), mpz_tdiv_qr(gc, gd, ga, gb));
+    }
     rand_pair(a, ga, 64);
     BENCH("tdiv_q_ui", 64, pbz_tdiv_q_ui(c, a, 1000000007UL), mpz_tdiv_q_ui(gc, ga, 1000000007UL));
     for (i = 0; i < sizeof sizes_str / sizeof *sizes_str; i++) {
