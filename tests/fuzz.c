@@ -2,6 +2,7 @@
  * Differential fuzzer: PocketBignum vs GMP.
  *     fuzz [iterations] [seed]
  */
+#define _POSIX_C_SOURCE 200809L   /* sigaction & sigsetjmp with -std=c99 (glibc) */
 #define PBN_IMPLEMENTATION
 #include "../pocketbignum.h"
 #include <gmp.h>
@@ -693,6 +694,40 @@ static void t_edge(void) {
 
 /* ---------------------------------------------------------------- main */
 
+#if !defined(_WIN32)
+#include <signal.h>
+#include <setjmp.h>
+static sigjmp_buf fpe_env;
+static void on_fpe(int sig) { (void)sig; siglongjmp(fpe_env, 1); }
+
+/* errors raise SIGFPE, as with GMP */
+static void t_sigfpe(void) {
+    struct sigaction sa, old;
+    pbz_t a, z, r;
+    volatile int raised;
+    pbz_init_set_ui(a, 7); pbz_init(z); pbz_init(r);
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_fpe;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGFPE, &sa, &old);
+#define EXPECT_FPE(what, stmt) do {                                             \
+        cur_op = what; raised = 0;                                              \
+        if (sigsetjmp(fpe_env, 1) == 0) { stmt; } else raised = 1;              \
+        check_int(what, raised, 1);                                             \
+    } while (0)
+    EXPECT_FPE("SIGFPE tdiv_q by 0", pbz_tdiv_q(r, a, z));
+    EXPECT_FPE("SIGFPE fdiv_q_ui by 0", pbz_fdiv_q_ui(r, a, 0));
+    EXPECT_FPE("SIGFPE powm mod 0", pbz_powm(r, a, a, z));
+    EXPECT_FPE("SIGFPE set_d(NaN)", pbz_set_d(r, NAN));
+    EXPECT_FPE("SIGFPE set_d(inf)", pbz_set_d(r, HUGE_VAL));
+    pbz_set_si(a, -4);
+    EXPECT_FPE("SIGFPE sqrt(-4)", pbz_sqrt(r, a));
+#undef EXPECT_FPE
+    sigaction(SIGFPE, &old, NULL);
+    pbz_clear(a); pbz_clear(z); pbz_clear(r);
+}
+#endif
+
 int main(int argc, char **argv) {
     unsigned long iters = argc > 1 ? strtoul(argv[1], NULL, 10) : 20000;
     unsigned long long seed = argc > 2 ? strtoull(argv[2], NULL, 10) : 0x1234567ull;
@@ -709,6 +744,9 @@ int main(int argc, char **argv) {
 #endif
            iters, seed);
     t_edge();
+#if !defined(_WIN32)
+    t_sigfpe();
+#endif
     for (it = 0; it < iters; it++) {
         t_arith();
         t_ui();

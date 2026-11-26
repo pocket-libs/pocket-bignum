@@ -389,6 +389,7 @@ static inline int pbq_sgn(pbq_srcptr q) { return pbz_sgn(&q->_mp_num); }
 
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
@@ -653,9 +654,20 @@ static void pbn_abort_default(const char *msg) {
     fprintf(stderr, "pocketbignum: %s\n", msg);
     abort();
 }
-#ifndef PBN_ABORT
+#ifdef PBN_ABORT
+#  define PBN_ABORT_USER 1
+#else
 #  define PBN_ABORT(msg) pbn_abort_default(msg)
 #endif
+
+/* what GMP signals with SIGFPE (division by zero, NaN or infinity to an integer, square
+   root of a negative number): SIGFPE here too - unless PBN_ABORT is given, then that */
+static void pbn_fpe(const char *msg) {
+#ifndef PBN_ABORT_USER
+    raise(SIGFPE);
+#endif
+    PBN_ABORT(msg);     /* (if the handler returns) */
+}
 
 static void *pbn_def_alloc(size_t n) {
     void *p = malloc(n);
@@ -699,7 +711,7 @@ PBN_DEF const char *const pbn_version = PBN_VERSION;
 #define PBN_TMP_GET(name, n)     ((n) <= PBN_STACK_LIMBS ? name##_stack : PBN_TMP_ALLOC(n))
 #define PBN_TMP_PUT(name, p, n)  do { if ((p) != name##_stack) PBN_TMP_FREE((p), (n)); } while (0)
 
-static void pbn_divzero(void) { PBN_ABORT("division by zero"); }
+static void pbn_divzero(void) { pbn_fpe("division by zero"); }
 
 /* ------------------------------------------------------------------------- */
 /* pbn_n: raw limb-array kernels                                             */
@@ -2673,7 +2685,7 @@ PBN_DEF void pbz_set_d(pbz_ptr r, double d) {
     int neg, e;
     double m;
     uint64_t mant;
-    if (d != d || d - d != 0) PBN_ABORT("invalid operation (NaN or infinity)");
+    if (d != d || d - d != 0) pbn_fpe("invalid operation (NaN or infinity)");
     neg = d < 0;
     if (neg) d = -d;
     if (d < 1.0) { SIZ(r) = 0; return; }
@@ -2738,7 +2750,7 @@ static int pbz_cmpabs_d_impl(pbz_srcptr a, double d) {
 
 PBN_DEF int pbz_cmp_d(pbz_srcptr a, double d) {
     int as, ds, c;
-    if (d != d) PBN_ABORT("invalid operation (NaN)");
+    if (d != d) pbn_fpe("invalid operation (NaN)");
     if (d - d != 0) return d > 0 ? -1 : 1;
     as = pbz_sgn(a);
     ds = d < 0 ? -1 : d > 0;
@@ -2749,7 +2761,7 @@ PBN_DEF int pbz_cmp_d(pbz_srcptr a, double d) {
 }
 
 PBN_DEF int pbz_cmpabs_d(pbz_srcptr a, double d) {
-    if (d != d) PBN_ABORT("invalid operation (NaN)");
+    if (d != d) pbn_fpe("invalid operation (NaN)");
     if (d - d != 0) return -1;
     return pbz_cmpabs_d_impl(a, d);
 }
@@ -4272,7 +4284,7 @@ PBN_DEF void pbz_sqrtrem(pbz_ptr s, pbz_ptr r, pbz_srcptr x) {
     unsigned k, sh;
     PBN_TMP_DECL(tb);
 
-    if (xn < 0) PBN_ABORT("square root of negative number");
+    if (xn < 0) pbn_fpe("square root of negative number");
     if (xn == 0) {
         if (s) SIZ(s) = 0;
         if (r) SIZ(r) = 0;
@@ -5657,7 +5669,7 @@ PBN_DEF double pbq_get_d(pbq_srcptr q) {
 PBN_DEF void pbq_set_d(pbq_ptr r, double d) {
     int neg, e;
     uint64_t m;
-    if (d != d || d - d != 0) PBN_ABORT("invalid operation (NaN or infinity)");
+    if (d != d || d - d != 0) pbn_fpe("invalid operation (NaN or infinity)");
     if (d == 0) { SIZ(QNUM(r)) = 0; pbz_set_ui(QDEN(r), 1); return; }
     neg = d < 0;
     m = (uint64_t)ldexp(frexp(neg ? -d : d, &e), 53);
