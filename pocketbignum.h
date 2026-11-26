@@ -758,12 +758,32 @@ static pbn_limb pbn_n_sub_n_c(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *
     return bw;
 }
 
-PBN_INLINE pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
-    return n < PBN_ADDSUB_ASM_THRESHOLD ? pbn_n_add_n_c(rp, ap, bp, n, 0) : pbn_n_add_n_long(rp, ap, bp, n);
+static pbn_limb pbn_n_add_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+    pbn_size i = 0;
+    pbn_limb cy = 0;
+    if (n >= PBN_ADDSUB_ASM_THRESHOLD) return pbn_n_add_n_long(rp, ap, bp, n);
+    for (; i + 4 <= n; i += 4) {
+        rp[i]     = pbn_addc(ap[i],     bp[i],     cy, &cy);
+        rp[i + 1] = pbn_addc(ap[i + 1], bp[i + 1], cy, &cy);
+        rp[i + 2] = pbn_addc(ap[i + 2], bp[i + 2], cy, &cy);
+        rp[i + 3] = pbn_addc(ap[i + 3], bp[i + 3], cy, &cy);
+    }
+    for (; i < n; i++) rp[i] = pbn_addc(ap[i], bp[i], cy, &cy);
+    return cy;
 }
 
-PBN_INLINE pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
-    return n < PBN_ADDSUB_ASM_THRESHOLD ? pbn_n_sub_n_c(rp, ap, bp, n, 0) : pbn_n_sub_n_long(rp, ap, bp, n);
+static pbn_limb pbn_n_sub_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+    pbn_size i = 0;
+    pbn_limb bw = 0;
+    if (n >= PBN_ADDSUB_ASM_THRESHOLD) return pbn_n_sub_n_long(rp, ap, bp, n);
+    for (; i + 4 <= n; i += 4) {
+        rp[i]     = pbn_subb(ap[i],     bp[i],     bw, &bw);
+        rp[i + 1] = pbn_subb(ap[i + 1], bp[i + 1], bw, &bw);
+        rp[i + 2] = pbn_subb(ap[i + 2], bp[i + 2], bw, &bw);
+        rp[i + 3] = pbn_subb(ap[i + 3], bp[i + 3], bw, &bw);
+    }
+    for (; i < n; i++) rp[i] = pbn_subb(ap[i], bp[i], bw, &bw);
+    return bw;
 }
 
 static pbn_limb pbn_n_add_1(pbn_limb *rp, const pbn_limb *ap, pbn_size n, pbn_limb b) {
