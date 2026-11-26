@@ -109,6 +109,14 @@ int main(int argc, char **argv) {
             pbz_limbs_modify(d, n)[0] |= 1; mpz_setbit(gd, 0);
             BENCH("powm (odd m)", n, pbz_powm(c, a, b, d), mpz_powm(gc, ga, gb, gd));
         }
+        /* small moduli, small exponents: 3^k mod (2^127 - 1), 3^k mod a 1-limb prime */
+        pbz_set_ui(a, 3); mpz_set_ui(ga, 3);
+        pbz_set_ui(b, 150001); mpz_set_ui(gb, 150001);
+        pbz_set_ui(d, 1); pbz_mul_2exp(d, d, 127); pbz_sub_ui(d, d, 1);
+        mpz_set_ui(gd, 1); mpz_mul_2exp(gd, gd, 127); mpz_sub_ui(gd, gd, 1);
+        BENCH("powm 2^127-1", 2, pbz_powm(c, a, b, d), mpz_powm(gc, ga, gb, gd));
+        pbz_set_ui(d, 18446744073709551557UL); mpz_set_ui(gd, 18446744073709551557UL);
+        BENCH("powm 1-limb m", 1, pbz_powm(c, a, b, d), mpz_powm(gc, ga, gb, gd));
     }
     {
         static const long gs[] = { 1, 4, 64, 256 };
