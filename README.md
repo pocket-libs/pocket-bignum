@@ -18,7 +18,9 @@ As a GMP/MPFR replacement, put `compat/` on the include path; `<gmp.h>` and
 `<mpfr.h>` then map `mpz_*`, `mpq_*`, `mpfr_*` to PocketBignum, with identical
 struct layouts and field names (`__mpz_struct`, `__mpq_struct`, `__mpfr_struct`).
 
-Options: `PBN_STATIC`, `PBN_LIMB_BITS=32|64`, `PBN_PORTABLE` (no intrinsics / `__int128`), `PBN_ABORT(msg)`.
+Options: `PBN_STATIC`, `PBN_LIMB_BITS=32|64`, `PBN_PORTABLE` (no intrinsics / `__int128`),
+`PBN_NO_ASM` (no assembly kernels), `PBN_ABORT(msg)`. Every algorithm threshold
+(`PBN_MUL_TOOM3_THRESHOLD`, `PBN_MUL_FFT_THRESHOLD`, ...) can be overridden with `-D`.
 
 ## Scope
 
@@ -45,6 +47,7 @@ make testthresholds        # fuzz with tiny thresholds: Karatsuba, Toom-3 & divi
 make bench                 # timings vs GMP / MPFR
 make bench-ruby            # timings vs Ruby's Integer (needs ruby)
 make bench-small           # small numbers (1-3 limbs), the way Arturo uses them
+tools/tune.sh [name...]    # threshold sweeps: each threshold timed with a few values
 ```
 
 Fuzzers run under ASan + UBSan and compare every result, ternary value and aliasing
@@ -52,35 +55,60 @@ variant against GMP 6.3 / MPFR 4.2.2 (needed only for testing: `GMP=/prefix`).
 
 ## Performance (vs GMP 6.3 / MPFR 4.2.2)
 
-Ratio = PocketBignum's time / GMP's or MPFR's (lower is better), medians of 5 runs
-on CI (Linux, 64-bit limbs; amd64: AMD EPYC, arm64: Neoverse-N2).
+Ratio = PocketBignum's time / GMP's or MPFR's (lower is better, 1.0× = same speed),
+medians of 5 runs on CI (Linux, 64-bit limbs; amd64: AMD EPYC, arm64: Neoverse-N2).
 
 | | amd64 | arm64 |
 |---|---|---|
-| mpz add, mul, sqr, sqrt (1–2 limbs) | 0.8–1.1× | 0.4–1.0× |
-| mpz mul, sqr (4–64 limbs) | 1.3–1.7× | 0.9–1.5× |
-| mpz mul, sqr (128–4096 limbs) | 1.5–2.1× | 1.5–2.2× |
-| mpz division (2n by n limbs) | 0.9–1.6× | 1.1–1.6× |
-| mpz gcd | 0.6× (1 limb) – 1.8× | 1.0–2.7× |
-| mpz powm, prime_p | 1.1–1.9× | 1.0–1.3× |
-| mpz fac_ui | 1.1–3.2× | 0.7–2.8× |
-| mpz get_str, set_str (base 10) | 0.9–1.9× | 1.1–1.9× |
-| mpq (small & ~120-bit parts) add, mul, div, cmp | 0.8–1.1× | 0.4–1.2× |
-| mpq get_d | 2.0–2.1× | 1.3–1.5× |
-| mpfr 53-bit add, sub, mul, cmp, set_d, get_d, get_str, set_str | 0.4–1.2× | 0.6–1.4× |
-| mpfr 53-bit div | 1.1× | 1.1× |
-| mpfr 256-bit add, sub | 2.9–4.2× | 2.0–3.6× |
-| mpfr 256-bit mul, div | 1.2–1.4× | 1.1× |
-| mpfr pow, pow_z | 1.8–2.6× | 1.7–2.3× |
-| **all 99 benchmarks (geometric mean)** | **1.23×** | **1.19×** |
+| mpz add (1–16 limbs) | 0.8–1.0× | 1.0–1.5× |
+| mpz add (64–256 limbs) | 1.4–1.6× | 1.8–2.0× |
+| mpz mul, sqr (1–2 limbs) | 0.8–1.0× | 0.4–1.0× |
+| mpz mul, sqr (4–64 limbs) | 1.3–2.0× | 0.9–1.5× |
+| mpz mul, sqr (128–4096 limbs) | 1.6–2.0× | 1.5–1.9× |
+| mpz mul, sqr (7000–100000 limbs, FFT) | 1.3–2.0× | 1.4–1.9× |
+| mpz division (2n by n limbs) | 1.1–1.6× | 1.1–1.5× |
+| mpz division (quotient much shorter than the divisor) | 2.0× | 1.8–1.9× |
+| mpz gcd | 0.7× (1 limb) – 1.9× | 1.0–1.9× |
+| mpz powm (1–2 limb moduli) | 0.8–0.9× | 0.5–0.9× |
+| mpz powm (4–32 limb moduli), prime_p | 1.3–2.1× | 1.0–1.3× |
+| mpz fac_ui | 0.2× (n = 20) – 2.0× | 0.3–2.0× |
+| mpz sqrt | 0.7× (1 limb) – 1.6× | 0.4–1.6× |
+| mpz get_str, set_str (base 10, 4–1024 limbs) | 1.1–1.7× | 1.1–1.6× |
+| mpq (small & ~120-bit parts) add, mul, div, cmp, get_str | 0.4–1.2× | 0.4–1.2× |
+| mpq get_d | 1.1–1.6× | 1.3–1.4× |
+| mpfr 53-bit add, sub, mul, cmp, set_d, get_d, get_str, set_str | 0.4–1.1× | 0.6–1.3× |
+| mpfr 53-bit div, add_d | 1.2–1.3× | 1.2× |
+| mpfr 256-bit add, sub | 2.7–3.8× | 2.0–3.6× |
+| mpfr 256-bit mul, div | 1.4× | 1.1–1.2× |
+| mpfr pow, pow_z | 1.8–2.8× | 1.7–2.3× |
+| **all 103 benchmarks (geometric mean)** | **1.19×** | **1.15×** |
 
-`make bench` runs the same benchmarks locally.
+`make bench` runs the same benchmarks locally. Inside Arturo (release builds, whole
+scripts), it's within 0.8–1.2× of GMP for everyday work (arithmetic loops, powmod,
+primality, conversions, small rationals), and 2–3.4× slower with numbers of tens of
+thousands of limbs (`3^3000000`, `factorial 150000`) or long sums of big fractions.
 
-## Known gaps / roadmap
+## Limitations
 
-- `mpfr_pow`: correct rounding via Ziv + atanh/Taylor series; needs double-limb kernels to reach MPFR speed
-- Multi-limb float add/sub: no same-precision fast path yet
-- Errors (division by zero, NaN to integer) call `PBN_ABORT` instead of raising SIGFPE
-- Not implemented (unused by Arturo): `mpf_*`, `mpn_*`, random numbers, `mpz_import/export`, I/O streams, other MPFR transcendentals
+- **Very large numbers**: multiplication above a few thousand limbs is a
+  number-theoretic transform modulo three primes (GMP has Schönhage–Strassen and
+  tuned assembly), 1.3–2× slower; there's no Newton division either (division is
+  divide & conquer at every size), so dividing or printing numbers of ~10⁵ limbs is
+  2–3× slower than GMP
+- **Mid-size multiplication** (300–2000 limbs): up to Toom-4 (no Toom-6/8), 1.5–1.8×
+- **Assembly**: only the `mul_1` / `addmul_1` / `submul_1` kernels, on x86-64 (with
+  ADX, detected at run time) and arm64, with GCC or Clang; everything else, MSVC,
+  32-bit and `PBN_PORTABLE` builds are plain C (add / sub of long numbers is 1.4–2×
+  slower than GMP's)
+- **Thresholds** are tuned for the CI runners' CPUs (amd64, arm64); others get
+  sensible defaults (`tools/tune.sh` re-tunes them)
+- **Floats**: no same-precision fast path for multi-limb add/sub (#23); `mpfr_pow`
+  needs double-limb kernels to reach MPFR's speed (#24)
+- **Errors** (division by zero, NaN to integer) call `PBN_ABORT` instead of raising
+  SIGFPE (#22)
+- **Memory functions** (`pbn_set_memory_functions`) are global: set them before any
+  thread uses the library
+- **Not implemented** (unused by Arturo): `mpf_*`, `mpn_*`, random numbers,
+  `mpz_import/export`, I/O streams, other MPFR transcendentals
 
 See also the [open issues](https://github.com/pocket-libs/pocket-bignum/issues).
