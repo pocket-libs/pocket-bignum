@@ -418,6 +418,39 @@ extern "C" {
 #define ALLOC(x) ((x)->_mp_alloc)
 #define PTR(x)   ((x)->_mp_d)
 
+/* thresholds that differ by CPU (tools/tune.sh); the rest are further down, all of them
+   overridable with -D */
+#if defined(__aarch64__) || defined(_M_ARM64)
+#  ifndef PBN_MUL_FFT_THRESHOLD
+#    define PBN_MUL_FFT_THRESHOLD 3000
+#  endif
+#  ifndef PBN_SQR_FFT_THRESHOLD
+#    define PBN_SQR_FFT_THRESHOLD 3000
+#  endif
+#  ifndef PBN_GCD_LEHMER2_THRESHOLD
+#    define PBN_GCD_LEHMER2_THRESHOLD 300
+#  endif
+#  ifndef PBN_GCD_HGCD_THRESHOLD
+#    define PBN_GCD_HGCD_THRESHOLD 200
+#  endif
+#elif defined(__x86_64__) || defined(_M_X64)
+#  ifndef PBN_MUL_FFT_THRESHOLD
+#    define PBN_MUL_FFT_THRESHOLD 5500     /* (from 3500 on, the FFT is faster at some sizes, slower at others) */
+#  endif
+#  ifndef PBN_SQR_FFT_THRESHOLD
+#    define PBN_SQR_FFT_THRESHOLD 5500
+#  endif
+#  ifndef PBN_GCD_HGCD_THRESHOLD
+#    define PBN_GCD_HGCD_THRESHOLD 400
+#  endif
+#  ifndef PBN_GET_STR_DC_THRESHOLD
+#    define PBN_GET_STR_DC_THRESHOLD 16
+#  endif
+#  ifndef PBN_SET_STR_DC_THRESHOLD
+#    define PBN_SET_STR_DC_THRESHOLD 192
+#  endif
+#endif
+
 #ifndef PBN_MUL_KARA_THRESHOLD
 #  define PBN_MUL_KARA_THRESHOLD 28
 #endif
@@ -428,7 +461,7 @@ extern "C" {
 #  define PBN_MUL_TOOM3_THRESHOLD 100
 #endif
 #ifndef PBN_MUL_TOOM4_THRESHOLD
-#  define PBN_MUL_TOOM4_THRESHOLD 300
+#  define PBN_MUL_TOOM4_THRESHOLD 250
 #endif
 #ifndef PBN_SQR_TOOM4_THRESHOLD
 #  define PBN_SQR_TOOM4_THRESHOLD 400
@@ -4340,7 +4373,7 @@ static pbn_size pbn_n_gcd(pbn_limb **res, pbn_limb *ap, pbn_size an, pbn_limb *b
 #    define PBN_GCD_HGCD_THRESHOLD 1000      /* limbs (of the smaller operand): half-gcd from here */
 #  endif
 #  ifndef PBN_HGCD_THRESHOLD
-#    define PBN_HGCD_THRESHOLD 100           /* limbs: below, the half-gcd by Lehmer steps */
+#    define PBN_HGCD_THRESHOLD 40            /* limbs: below, the half-gcd by Lehmer steps */
 #  endif
 
 typedef struct { pbz_t u[4]; int s; } pbn_hmat;
