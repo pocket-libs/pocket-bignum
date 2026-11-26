@@ -456,6 +456,7 @@ static inline int pbq_sgn(pbq_srcptr q) { return pbz_sgn(&q->_mp_num); }
 
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
@@ -720,9 +721,20 @@ static void pbn_abort_default(const char *msg) {
     fprintf(stderr, "pocketbignum: %s\n", msg);
     abort();
 }
-#ifndef PBN_ABORT
+#ifdef PBN_ABORT
+#  define PBN_ABORT_USER 1
+#else
 #  define PBN_ABORT(msg) pbn_abort_default(msg)
 #endif
+
+/* what GMP signals with SIGFPE (division by zero, NaN or infinity to an integer, square
+   root of a negative number): SIGFPE here too - unless PBN_ABORT is given, then that */
+static void pbn_fpe(const char *msg) {
+#ifndef PBN_ABORT_USER
+    raise(SIGFPE);
+#endif
+    PBN_ABORT(msg);     /* (if the handler returns) */
+}
 
 static void *pbn_def_alloc(size_t n) {
     void *p = malloc(n);
@@ -766,7 +778,7 @@ PBN_DEF const char *const pbn_version = PBN_VERSION;
 #define PBN_TMP_GET(name, n)     ((n) <= PBN_STACK_LIMBS ? name##_stack : PBN_TMP_ALLOC(n))
 #define PBN_TMP_PUT(name, p, n)  do { if ((p) != name##_stack) PBN_TMP_FREE((p), (n)); } while (0)
 
-static void pbn_divzero(void) { PBN_ABORT("division by zero"); }
+static void pbn_divzero(void) { pbn_fpe("division by zero"); }
 
 /* ------------------------------------------------------------------------- */
 /* pbn_n: raw limb-array kernels                                             */
@@ -2740,7 +2752,7 @@ PBN_DEF void pbz_set_d(pbz_ptr r, double d) {
     int neg, e;
     double m;
     uint64_t mant;
-    if (d != d || d - d != 0) PBN_ABORT("invalid operation (NaN or infinity)");
+    if (d != d || d - d != 0) pbn_fpe("invalid operation (NaN or infinity)");
     neg = d < 0;
     if (neg) d = -d;
     if (d < 1.0) { SIZ(r) = 0; return; }
@@ -2805,7 +2817,7 @@ static int pbz_cmpabs_d_impl(pbz_srcptr a, double d) {
 
 PBN_DEF int pbz_cmp_d(pbz_srcptr a, double d) {
     int as, ds, c;
-    if (d != d) PBN_ABORT("invalid operation (NaN)");
+    if (d != d) pbn_fpe("invalid operation (NaN)");
     if (d - d != 0) return d > 0 ? -1 : 1;
     as = pbz_sgn(a);
     ds = d < 0 ? -1 : d > 0;
@@ -2816,7 +2828,7 @@ PBN_DEF int pbz_cmp_d(pbz_srcptr a, double d) {
 }
 
 PBN_DEF int pbz_cmpabs_d(pbz_srcptr a, double d) {
-    if (d != d) PBN_ABORT("invalid operation (NaN)");
+    if (d != d) pbn_fpe("invalid operation (NaN)");
     if (d - d != 0) return -1;
     return pbz_cmpabs_d_impl(a, d);
 }
@@ -4339,7 +4351,7 @@ PBN_DEF void pbz_sqrtrem(pbz_ptr s, pbz_ptr r, pbz_srcptr x) {
     unsigned k, sh;
     PBN_TMP_DECL(tb);
 
-    if (xn < 0) PBN_ABORT("square root of negative number");
+    if (xn < 0) pbn_fpe("square root of negative number");
     if (xn == 0) {
         if (s) SIZ(s) = 0;
         if (r) SIZ(r) = 0;
@@ -5674,6 +5686,27 @@ PBN_DEF double pbq_get_d(pbq_srcptr q) {
     long k, bits, ehi, allowed;
     double d;
     if (SIZ(QNUM(q)) == 0) return 0.0;
+#if defined(PBN_HAVE_DLIMB) && PBN_B == 64
+    /* both parts below 2^53: exact as doubles, so one division, then truncated (as GMP
+       does) by checking whether d * den went past num, exactly, on 128 bits */
+    if (PBN_ABS(SIZ(QNUM(q))) == 1 && SIZ(QDEN(q)) == 1
+        && PTR(QNUM(q))[0] < ((pbn_limb)1 << 53) && PTR(QDEN(q))[0] < ((pbn_limb)1 << 53)) {
+        pbn_limb nn = PTR(QNUM(q))[0], dd = PTR(QDEN(q))[0], m;
+        int e, sh;
+        pbn_dlimb lhs;
+        d = (double)nn / (double)dd;
+        m = (pbn_limb)ldexp(frexp(d, &e), 53);       /* d = m 2^(e - 53) */
+        lhs = (pbn_dlimb)m * dd;                      /* d * den = lhs 2^(e - 53) */
+        sh = e - 53;                                  /* d >= 2^-53: sh >= -105 */
+        if (sh >= 0) {
+            if ((lhs << sh) > nn) d = nextafter(d, 0.0);          /* (below 2^107) */
+        } else {
+            pbn_dlimb hi = lhs >> -sh, lo = lhs & ((((pbn_dlimb)1) << -sh) - 1);
+            if (hi > nn || (hi == nn && lo != 0)) d = nextafter(d, 0.0);
+        }
+        return SIZ(QNUM(q)) < 0 ? -d : d;
+    }
+#endif
     pbz_abs(n, QNUM(q));
     k = 55 + (long)pbz_bitlen(QDEN(q)) - (long)pbz_bitlen(n);
     if (k >= 0) pbz_mul_2exp(n, n, (pbn_bitcnt)k);
@@ -5703,7 +5736,7 @@ PBN_DEF double pbq_get_d(pbq_srcptr q) {
 PBN_DEF void pbq_set_d(pbq_ptr r, double d) {
     int neg, e;
     uint64_t m;
-    if (d != d || d - d != 0) PBN_ABORT("invalid operation (NaN or infinity)");
+    if (d != d || d - d != 0) pbn_fpe("invalid operation (NaN or infinity)");
     if (d == 0) { SIZ(QNUM(r)) = 0; pbz_set_ui(QDEN(r), 1); return; }
     neg = d < 0;
     m = (uint64_t)ldexp(frexp(neg ? -d : d, &e), 53);
