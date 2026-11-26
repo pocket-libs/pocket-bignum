@@ -2414,10 +2414,53 @@ static void pbn_n_tdiv_qr_dc(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn
     PBN_TMP_FREE(u, nn + 1 + dn);
 }
 
+static void pbn_n_tdiv_qr(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
+                          const pbn_limb *dp, pbn_size dn);
+
+/* a quotient much shorter than the divisor (m = nn-dn+1 limbs, dn > 2m): it only depends
+   on the top of both, so the top 2m limbs by the top m+1 of the divisor give it to within
+   a couple of units; one product (m by dn limbs) and a few adds or subtractions then fix
+   it, and give the remainder. (Dividing by the whole divisor would be quadratic) */
+static void pbn_n_tdiv_qr_unbalanced(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
+                                     const pbn_limb *dp, pbn_size dn) {
+    pbn_size m = nn - dn + 1, t = m + 1, qn = m;
+    pbn_limb *tq = PBN_TMP_ALLOC(t + (nn + 1) + (nn + 1)), *pp = tq + t, *xp = pp + nn + 1;
+
+    pbn_n_tdiv_qr(qp, tq, np + (dn - t), 2 * m, dp + (dn - t), t);
+
+    /* pp = q dp (nn+1 limbs), xp = the dividend (nn+1 limbs) */
+    PBN_NORM(qp, qn);
+    if (qn) {
+        pbn_n_mul(pp, dp, dn, qp, qn);
+        pbn_n_zero(pp + dn + qn, nn + 1 - (dn + qn));
+    } else {
+        pbn_n_zero(pp, nn + 1);
+    }
+    pbn_n_zero(qp + qn, m - qn);
+    pbn_n_copy(xp, np, nn);
+    xp[nn] = 0;
+
+    /* too big: q -= 1, pp -= d */
+    while (pbn_n_cmp(pp, xp, nn + 1) > 0) {
+        pbn_n_sub_1(qp, qp, m, 1);
+        pbn_n_sub(pp, pp, nn + 1, dp, dn);
+    }
+    /* r = x - pp; too small: q += 1, r -= d */
+    pbn_n_sub_n(xp, xp, pp, nn + 1);
+    while (pbn_n_cmp2(xp, nn + 1, dp, dn) >= 0) {
+        pbn_n_add_1(qp, qp, m, 1);
+        pbn_n_sub(xp, xp, nn + 1, dp, dn);
+    }
+    pbn_n_copy(rp, xp, dn);
+    PBN_TMP_FREE(tq, t + (nn + 1) + (nn + 1));
+}
+
 /* qp: nn-dn+1 limbs, rp: dn limbs; nothing may overlap */
 static void pbn_n_tdiv_qr(pbn_limb *qp, pbn_limb *rp, const pbn_limb *np, pbn_size nn,
                           const pbn_limb *dp, pbn_size dn) {
-    if (dn >= PBN_DC_DIV_THRESHOLD && nn - dn + 1 >= PBN_DC_DIV_THRESHOLD)
+    if (nn - dn + 1 >= PBN_DC_DIV_THRESHOLD && dn > 2 * (nn - dn + 1))
+        pbn_n_tdiv_qr_unbalanced(qp, rp, np, nn, dp, dn);
+    else if (dn >= PBN_DC_DIV_THRESHOLD && nn - dn + 1 >= PBN_DC_DIV_THRESHOLD)
         pbn_n_tdiv_qr_dc(qp, rp, np, nn, dp, dn);
     else
         pbn_n_tdiv_qr_basecase(qp, rp, np, nn, dp, dn);
