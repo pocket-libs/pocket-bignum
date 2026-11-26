@@ -13,13 +13,8 @@ mkdir -p build/tune
 
 # name | op | threshold | candidates (current first) | sizes | extra flags
 EXPERIMENTS='
-toom3    | mul     | PBN_MUL_TOOM3_THRESHOLD   | 100 120 130 150 180               | 90 110 130 150 170 200 250
-toom4    | mul     | PBN_MUL_TOOM4_THRESHOLD   | 300 200 225 250 275               | 180 220 260 300 400 600 1000
-lehmer2  | gcd     | PBN_GCD_LEHMER2_THRESHOLD | 100 150 200 300 400               | 80 120 160 200 300 400 600
-hgcd     | gcd     | PBN_GCD_HGCD_THRESHOLD    | 1000 200 300 400 500              | 250 350 500 700 1000 1500 3000
-hgcdin   | gcd     | PBN_HGCD_THRESHOLD        | 100 20 30 40 60                   | 1500 3000 6000
-getstr   | get_str | PBN_GET_STR_DC_THRESHOLD  | 32 12 16 20 24                    | 16 24 32 48 64 128 512
-setstr   | set_str | PBN_SET_STR_DC_THRESHOLD  | 128 160 192 256 384               | 128 192 256 384 512 1024
+fft      | mul     | PBN_MUL_FFT_THRESHOLD     | 7000 2000 3000 4000 5000 6000     | 1500 2000 2500 3000 3500 4000 4500 5000 5500 6000 6500 7000 8000 9000
+sqrfft   | sqr     | PBN_SQR_FFT_THRESHOLD     | 7000 2000 3000 4000 5000 6000     | 1500 2000 2500 3000 3500 4000 4500 5000 5500 6000 6500 7000 8000 9000
 '
 
 echo "$EXPERIMENTS" | while IFS='|' read -r name op thr cands sizes extra; do
