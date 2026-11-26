@@ -3885,9 +3885,140 @@ static void pbz_powm_even(pbz_ptr r, pbz_srcptr base, pbz_srcptr e, pbz_srcptr m
     pbz_clear(x);
 }
 
+/* ---- powm for odd moduli of 1 or 2 limbs (Arturo's usual case): Montgomery products
+        written out (CIOS), no allocation at all ---- */
+
+/* a b / B mod m (a, b < m) */
+PBN_INLINE pbn_limb pbn_mont1(pbn_limb a, pbn_limb b, pbn_limb m, pbn_limb minv) {
+    pbn_limb hi, lo = pbn_umul(a, b, &hi), h2, r, c;
+    pbn_umul(lo * minv, m, &h2);
+    r = hi + h2;               /* (ab + qm) / B, the low halves adding up to 0 or B */
+    c = r < hi;
+    r += lo != 0;
+    c |= r < (pbn_limb)(lo != 0);
+    return c || r >= m ? r - m : r;
+}
+
+/* {r, 2} = a b / B^2 mod m (a, b < m); a*b + c + d never exceeds two limbs */
+PBN_INLINE void pbn_mont2(pbn_limb *r, const pbn_limb *a, const pbn_limb *b, const pbn_limb *m, pbn_limb minv) {
+    pbn_limb t0, t1, t2, t3, t4, hi, lo, c, q;
+    t0 = pbn_umul(a[0], b[0], &c);
+    lo = pbn_umul(a[0], b[1], &hi); t1 = lo + c; t2 = hi + (t1 < lo);
+    q = t0 * minv;
+    lo = pbn_umul(q, m[0], &hi); t0 += lo; c = hi + (t0 < lo);
+    lo = pbn_umul(q, m[1], &hi); lo += c; hi += lo < c; t1 += lo; hi += t1 < lo;
+    t2 += hi; t3 = t2 < hi;
+    /* (t1, t2, t3): one limb down */
+    lo = pbn_umul(a[1], b[0], &hi); t1 += lo; c = hi + (t1 < lo);
+    lo = pbn_umul(a[1], b[1], &hi); lo += c; hi += lo < c; t2 += lo; hi += t2 < lo;
+    t3 += hi; t4 = t3 < hi;     /* (with m close to B^2, this can carry already) */
+    q = t1 * minv;
+    lo = pbn_umul(q, m[0], &hi); t1 += lo; c = hi + (t1 < lo);
+    lo = pbn_umul(q, m[1], &hi); lo += c; hi += lo < c; t2 += lo; hi += t2 < lo;
+    t3 += hi; c = t4 + (t3 < hi);
+    /* (t2, t3, c) < 2m */
+    if (c || t3 > m[1] || (t3 == m[1] && t2 >= m[0])) {
+        pbn_limb bw = t2 < m[0];
+        t2 -= m[0];
+        t3 = t3 - m[1] - bw;
+    }
+    r[0] = t2;
+    r[1] = t3;
+}
+
+#define PBN_MONT(x, y, z) do {                                                      \
+        if (n == 1) (x)[0] = pbn_mont1((y)[0], (z)[0], mp[0], minv);                \
+        else pbn_mont2((x), (y), (z), mp, minv);                                    \
+    } while (0)
+
+/* r = b^e mod m, m odd with n = 1 or 2 limbs (and > 1), e > 0 */
+static void pbz_powm_small(pbz_ptr r, pbz_srcptr b, pbz_srcptr e, const pbn_limb *mp, pbn_size n) {
+    pbn_limb minv = pbn_binvert_neg(mp[0]), x[2] = { 0, 0 }, t[2], tbl[8][2], q[4], num[4] = { 0, 0, 0, 0 };
+    const pbn_limb *ep = PTR(e);
+    pbn_size bn = PBN_ABS(SIZ(b)), i;
+    pbn_bitcnt ebits = pbz_bitlen(e);
+    long bi;
+    int k, first = 1;
+
+    /* the base, reduced (b mod m, then m - that for b < 0) */
+    if (bn > n || (bn == n && pbn_n_cmp(PTR(b), mp, n) >= 0)) {
+        pbn_limb *qq = PBN_TMP_ALLOC(bn - n + 1);
+        pbn_n_tdiv_qr(qq, t, PTR(b), bn, mp, n);
+        PBN_TMP_FREE(qq, bn - n + 1);
+    } else {
+        t[1] = 0;
+        pbn_n_copy(t, PTR(b), bn);
+        if (bn < 2) t[1] = 0;
+        if (bn == 0) t[0] = 0;
+    }
+    if (n == 1) t[1] = 0;
+    if (t[0] == 0 && t[1] == 0) { SIZ(r) = 0; return; }
+    if (SIZ(b) < 0) pbn_n_sub_n(t, mp, t, n);
+
+    /* into Montgomery form: t B^n mod m */
+    pbn_n_copy(num + n, t, n);
+    {
+        pbn_size nn = 2 * n;
+        PBN_NORM(num, nn);
+        pbn_n_tdiv_qr(q, tbl[0], num, nn, mp, n);
+    }
+
+    k = ebits <= 7 ? 1 : ebits <= 24 ? 2 : ebits <= 80 ? 3 : 4;
+    if (k > 1) {
+        PBN_MONT(x, tbl[0], tbl[0]);
+        for (i = 1; i < ((pbn_size)1 << (k - 1)); i++) PBN_MONT(tbl[i], tbl[i - 1], x);
+    }
+
+    bi = (long)ebits - 1;
+    while (bi >= 0) {
+        long j, s;
+        unsigned w;
+        if (!PBN_GETBIT(ep, (pbn_bitcnt)bi)) {
+            PBN_MONT(x, x, x);
+            bi--;
+            continue;
+        }
+        j = bi - k + 1;
+        if (j < 0) j = 0;
+        while (!PBN_GETBIT(ep, (pbn_bitcnt)j)) j++;
+        w = 0;
+        for (s = bi; s >= j; s--) w = (w << 1) | (unsigned)PBN_GETBIT(ep, (pbn_bitcnt)s);
+        if (first) {
+            x[0] = tbl[w >> 1][0];
+            x[1] = tbl[w >> 1][1];
+            first = 0;
+        } else {
+            for (s = 0; s < bi - j + 1; s++) PBN_MONT(x, x, x);
+            PBN_MONT(x, x, tbl[w >> 1]);
+        }
+        bi = j - 1;
+    }
+
+    /* out of Montgomery form: x * 1 / B^n */
+    t[0] = 1;
+    t[1] = 0;
+    PBN_MONT(x, x, t);
+    {
+        pbn_limb *rp = PBZ_GROW(r, n);
+        pbn_size rn = n;
+        pbn_n_copy(rp, x, n);
+        PBN_NORM(rp, rn);
+        SIZ(r) = (int)rn;
+    }
+}
+#undef PBN_MONT
+
 PBN_DEF void pbz_powm(pbz_ptr r, pbz_srcptr b, pbz_srcptr e, pbz_srcptr m) {
     pbz_t base, mm, ee;
     if (SIZ(m) == 0) pbn_divzero();
+    {
+        /* small odd moduli, e > 0: straight to the limbs (no temporaries) */
+        pbn_size n = PBN_ABS(SIZ(m));
+        if (n <= 2 && SIZ(e) > 0 && (PTR(m)[0] & 1) && (n == 2 || PTR(m)[0] > 1)) {
+            pbz_powm_small(r, b, e, PTR(m), n);
+            return;
+        }
+    }
     pbz_init(base);
     pbz_init(mm);
     pbz_abs(mm, m);
