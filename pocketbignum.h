@@ -5607,6 +5607,27 @@ PBN_DEF double pbq_get_d(pbq_srcptr q) {
     long k, bits, ehi, allowed;
     double d;
     if (SIZ(QNUM(q)) == 0) return 0.0;
+#if defined(PBN_HAVE_DLIMB) && PBN_B == 64
+    /* both parts below 2^53: exact as doubles, so one division, then truncated (as GMP
+       does) by checking whether d * den went past num, exactly, on 128 bits */
+    if (PBN_ABS(SIZ(QNUM(q))) == 1 && SIZ(QDEN(q)) == 1
+        && PTR(QNUM(q))[0] < ((pbn_limb)1 << 53) && PTR(QDEN(q))[0] < ((pbn_limb)1 << 53)) {
+        pbn_limb nn = PTR(QNUM(q))[0], dd = PTR(QDEN(q))[0], m;
+        int e, sh;
+        pbn_dlimb lhs;
+        d = (double)nn / (double)dd;
+        m = (pbn_limb)ldexp(frexp(d, &e), 53);       /* d = m 2^(e - 53) */
+        lhs = (pbn_dlimb)m * dd;                      /* d * den = lhs 2^(e - 53) */
+        sh = e - 53;                                  /* d >= 2^-53: sh >= -105 */
+        if (sh >= 0) {
+            if ((lhs << sh) > nn) d = nextafter(d, 0.0);          /* (below 2^107) */
+        } else {
+            pbn_dlimb hi = lhs >> -sh, lo = lhs & ((((pbn_dlimb)1) << -sh) - 1);
+            if (hi > nn || (hi == nn && lo != 0)) d = nextafter(d, 0.0);
+        }
+        return SIZ(QNUM(q)) < 0 ? -d : d;
+    }
+#endif
     pbz_abs(n, QNUM(q));
     k = 55 + (long)pbz_bitlen(QDEN(q)) - (long)pbz_bitlen(n);
     if (k >= 0) pbz_mul_2exp(n, n, (pbn_bitcnt)k);
