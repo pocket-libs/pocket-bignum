@@ -1,0 +1,40 @@
+name: Tune
+
+# TEMPORARY: threshold sweeps on quiet runners (tools/tune.sh)
+
+on:
+    push:
+        branches: [tune]
+    workflow_dispatch:
+        inputs:
+            only:
+                description: 'Experiments (space-separated; empty = all)'
+                default: ''
+
+jobs:
+    tune:
+        name: tune (${{ matrix.name }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 120
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { name: linux-amd64, os: ubuntu-latest }
+                    - { name: linux-arm64, os: ubuntu-24.04-arm }
+        steps:
+            - uses: actions/checkout@v6
+            - name: Install GMP
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y libgmp-dev
+                lscpu | sed -n 's/^Model name: *//p' | head -1
+            - name: Sweep
+              env:
+                GMP_PREFIX: /usr
+                RUNNER: sudo nice -n -20 taskset -c 1
+              run: tools/tune.sh ${{ github.event.inputs.only }} | tee tune.txt
+            - uses: actions/upload-artifact@v6
+              with:
+                name: tune-${{ matrix.name }}
+                path: tune.txt
