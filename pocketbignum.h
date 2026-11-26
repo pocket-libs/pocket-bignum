@@ -6393,7 +6393,7 @@ PBN_DEF int pbf_set_str(pbf_ptr r, const char *s, int base, pbf_rnd_t rnd) {
     /* special values */
     if ((k = pbf_match_ci(p, "@nan@")) != 0 || ((base <= 16) && (k = pbf_match_ci(p, "nan")) != 0)) {
         p += k;
-        if (k == 3 && *p == '(') {
+        if (*p == '(') {
             const char *q = p + 1;
             while ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || *q == '_') q++;
             if (*q == ')') p = q + 1;
