@@ -43,7 +43,7 @@
 #include <stdint.h>
 #include <limits.h>
 
-#define PBN_VERSION "0.1.0"
+#define PBN_VERSION "0.2.0"
 
 #ifndef PBN_LIMB_BITS
 #  if UINTPTR_MAX > 0xFFFFFFFFu || defined(__SIZEOF_INT128__)

@@ -145,11 +145,11 @@ The fuzzers run under ASan + UBSan, comparing every result, ternary value and al
 
 - Very large numbers: multiplication above a few thousand limbs goes through an FFT modulo three primes (GMP uses Schönhage–Strassen and hand-tuned assembly) and is 1.3–2× slower; there's no Newton division either (division is divide & conquer at every size), so dividing or printing numbers of ~10⁵ limbs is 2–3× slower than GMP
 - Mid-size multiplication (300–2000 limbs): it goes up to Toom-4 (no Toom-6/8) and is 1.5–1.8× slower
-- Assembly: only the `add_n` / `sub_n` / `mul_1` / `addmul_1` / `submul_1` kernels, on x86-64 (`mul_1` & co. with ADX, detected at runtime) and arm64, with GCC or Clang - everything else (and MSVC, 32-bit or `PBN_PORTABLE` builds) is plain C
+- Assembly: only the `add_n` / `sub_n` / `mul_1` / `addmul_1` / `submul_1` kernels, on x86-64 (`mul_1` & co. with ADX, detected at runtime) and arm64, with GCC or Clang - everything else (and MSVC, 32-bit or `PBN_PORTABLE` builds) is plain C; e.g. 4-16 limb products on amd64 are 1.3-2× slower than with GMP ([#45](https://github.com/pocket-libs/pocket-bignum/issues/45))
 - Thresholds are tuned for the CPUs of the CI runners (amd64 & arm64) - for other ones, `tools/tune.sh` will find better values
 - Floats: there's no same-precision fast path for multi-limb add/sub ([#23](https://github.com/pocket-libs/pocket-bignum/issues/23)), and `pow` needs double-limb kernels to get to MPFR's speed ([#24](https://github.com/pocket-libs/pocket-bignum/issues/24))
 - The memory functions (`pbn_set_memory_functions`) are global: set them before any thread uses the library
-- Not implemented: `mpf_*`, `mpn_*`, random numbers, `mpz_import/export`, I/O streams, and MPFR's transcendentals (`exp`, `log`, trigonometric functions, etc. - `pow` is there)
+- Not implemented: `mpf_*`, `mpn_*`, random numbers & `mpz_import/export` ([#47](https://github.com/pocket-libs/pocket-bignum/issues/47)), I/O streams, and MPFR's transcendentals (`exp`, `log`, trigonometric functions, etc. - `pow` is there: [#48](https://github.com/pocket-libs/pocket-bignum/issues/48))
 
 > [!IMPORTANT]
 > For anything else, have a look at the [open issues](https://github.com/pocket-libs/pocket-bignum/issues) - or open a new one!
