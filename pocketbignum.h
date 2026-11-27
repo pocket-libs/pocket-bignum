@@ -3976,7 +3976,96 @@ PBN_DEF void pbz_mod(pbz_ptr r, pbz_srcptr n, pbz_srcptr d) {
     if (copied) pbz_clear(dc);
 }
 
+/* m^{-1} mod B, m odd */
+PBN_INLINE pbn_limb pbn_binvert_limb(pbn_limb m) {
+    pbn_limb x = m;
+    int i;
+    for (i = 0; i < 5; i++) x *= 2 - m * x;
+    return x;
+}
+
+/* qp[0..n) = np[0..n) / d, the division being exact (d odd): multiplying by d's inverse mod
+   B, limb by limb - instead of dividing (Jebelean / Granlund & Montgomery) */
+static void pbn_n_divexact_1_odd(pbn_limb *qp, const pbn_limb *np, pbn_size n, pbn_limb d) {
+    pbn_limb inv = pbn_binvert_limb(d), c = 0, s, l, h;
+    pbn_size i;
+    for (i = 0; i < n; i++) {
+        s = np[i];
+        l = s - c;
+        c = l > s;
+        l *= inv;
+        qp[i] = l;
+        pbn_umul(l, d, &h);
+        c += h;
+    }
+}
+
+/* r with r = n B^-k (mod d), up to sign, 0 <= r <= d, d odd: what the exact division above
+   leaves - enough to tell whether d divides n, or for gcd(n, d) (B and d being coprime) */
+static pbn_limb pbn_n_modexact_1_odd(const pbn_limb *np, pbn_size n, pbn_limb d) {
+    pbn_limb inv = pbn_binvert_limb(d), c = 0, s, l, h;
+    pbn_size i;
+    for (i = 0; i < n; i++) {
+        s = np[i];
+        l = s - c;
+        c = l > s;
+        l *= inv;
+        pbn_umul(l, d, &h);
+        c += h;
+    }
+    return c;
+}
+
+#if defined(PBN_HAVE_DLIMB)
+/* n mod d for d < B/8, four limbs per step with b_k = B^k mod d: the 2-limb r (any value: it
+   only gets multiplied) becomes n0 + n1 b1 + n2 b2 + n3 b3 + r0 b4 + r1 b5, below B^2 - so only
+   two of those products wait for the previous step, and there's a single division at the end */
+static pbn_limb pbn_n_mod_1_4(const pbn_limb *np, pbn_size n, pbn_limb d) {
+    pbn_limb b[6], r0, r1;
+    pbn_dlimb acc, t;
+    pbn_size i;
+    int k;
+    b[0] = 1;
+    for (k = 1; k < 6; k++) b[k] = (pbn_limb)((((pbn_dlimb)b[k - 1]) << PBN_B) % d);
+    r1 = np[n - 1]; r0 = np[n - 2];
+    i = n - 2;
+    while (i % 4) {                         /* single limbs, until a multiple of four is left */
+        i--;
+        acc = (pbn_dlimb)np[i] + (pbn_dlimb)r0 * b[1] + (pbn_dlimb)r1 * b[2];
+        r0 = (pbn_limb)acc; r1 = (pbn_limb)(acc >> PBN_B);
+    }
+    while (i > 0) {
+        i -= 4;
+        acc = (pbn_dlimb)np[i] + (pbn_dlimb)np[i + 1] * b[1];
+        t = (pbn_dlimb)np[i + 2] * b[2] + (pbn_dlimb)np[i + 3] * b[3];
+        acc += t;
+        t = (pbn_dlimb)r0 * b[4] + (pbn_dlimb)r1 * b[5];
+        acc += t;
+        r0 = (pbn_limb)acc; r1 = (pbn_limb)(acc >> PBN_B);
+    }
+    return (pbn_limb)((((pbn_dlimb)r1 << PBN_B) | r0) % d);
+}
+#endif
+
 PBN_DEF void pbz_divexact(pbz_ptr q, pbz_srcptr n, pbz_srcptr d) {
+    pbn_size nn = PBN_ABS(SIZ(n));
+    if (PBN_ABS(SIZ(d)) == 1 && nn > 2) {
+        /* a single-limb divisor (of a number that isn't tiny: those are quicker as they
+           were, with a division): d = d' 2^z, with d' odd */
+        pbn_limb dv = PTR(d)[0], *qp;
+        int z = pbn_ctz(dv), neg = (SIZ(n) < 0) != (SIZ(d) < 0);
+        if (dv == 1) { pbz_set(q, n); if (SIZ(d) < 0) pbz_neg(q, q); return; }
+        qp = PBZ_GROW(q, nn);                /* (n may be q: still there, as it was) */
+        if (z) {
+            pbn_n_rshift(qp, PTR(n), nn, z);
+            pbn_n_divexact_1_odd(qp, qp, nn, dv >> z);
+        } else {
+            pbn_n_divexact_1_odd(qp, PTR(n), nn, dv);
+        }
+        while (nn > 0 && qp[nn - 1] == 0) nn--;
+        SIZ(q) = neg ? -(int)nn : (int)nn;
+        return;
+    }
     if (SIZ(d) == 1 && PTR(d)[0] == 1) { pbz_set(q, n); return; }
     pbz_div_qr(q, NULL, n, d, PBN_TRUNC);
 }
@@ -5127,6 +5216,27 @@ PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
         return;
     }
 #endif
+    if ((an == 1) != (bn == 1) && PBN_MAX(an, bn) > 2) {
+        /* a single limb & a bigger one: one pass over the big one, without any division -
+           gcd(n, d) = 2^min(ctz n, ctz d) gcd(n, d') with d' = d's odd part, and that's
+           gcd(r, d'), with r from modexact */
+        const pbn_limb *np = an == 1 ? PTR(b) : PTR(a);
+        pbn_size nn = an == 1 ? bn : an, k = 0;
+        pbn_limb d = an == 1 ? PTR(a)[0] : PTR(b)[0], r;
+        int z = pbn_ctz(d), zn;
+        while (np[k] == 0) k++;
+        zn = k * PBN_B + pbn_ctz(np[k]) < z ? (int)(k * PBN_B + pbn_ctz(np[k])) : z;
+        d >>= z;
+#if defined(PBN_HAVE_DLIMB)
+        if (d > 1 && nn >= 8 && d < (pbn_limb)1 << (PBN_B - 3)) r = pbn_n_mod_1_4(np, nn, d);
+        else
+#endif
+        r = d == 1 ? 1 : pbn_n_modexact_1_odd(np, nn, d);
+        gp = PBZ_GROW(g, 1);
+        gp[0] = pbn_gcd_limb(r, d) << zn;
+        SIZ(g) = 1;
+        return;
+    }
     if (an == 1 && bn == 1) {
         pbn_limb v = pbn_gcd_limb(PTR(a)[0], PTR(b)[0]);
         gp = PBZ_GROW(g, 1);

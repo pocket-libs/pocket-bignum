@@ -341,6 +341,22 @@ static void t_div(void) {
         if (mpz_divisible_p(gn, gd)) {
             cur_op = "divexact"; pbz_divexact(r, n, d); mpz_divexact(e, gn, gd); check(cur_op, r, e);
         }
+        {   /* exact divisions (& gcds) that aren't just luck: n d / d, gcd(n d, d), gcd(n d, d / 2^k) */
+            pbz_t p; mpz_t gp, ge;
+            pbz_init(p); mpz_init(gp); mpz_init(ge);
+            pbz_mul(p, n, d); mpz_mul(gp, gn, gd);
+            cur_op = "divexact n*d/d"; pbz_divexact(r, p, d); mpz_divexact(e, gp, gd); check(cur_op, r, e);
+            pbz_set(r, p); pbz_divexact(r, r, d); check("divexact n*d/d alias", r, e);
+            cur_op = "gcd n*d,d"; pbz_gcd(r, p, d); mpz_gcd(e, gp, gd); check(cur_op, r, e);
+            pbz_gcd(r, d, p); check("gcd d,n*d", r, e);
+            mpz_tdiv_q_2exp(ge, gd, rndn(4));
+            if (mpz_sgn(ge)) {
+                pbz_t h; pbz_init(h); from_gmp(h, ge);
+                cur_op = "gcd n*d,d/2^k"; pbz_gcd(r, p, h); mpz_gcd(e, gp, ge); check(cur_op, r, e);
+                pbz_clear(h);
+            }
+            pbz_clear(p); mpz_clear(gp); mpz_clear(ge);
+        }
         pbz_clear(r); mpz_clear(e);
     }
     u = gen_ul();
