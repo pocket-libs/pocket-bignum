@@ -1711,7 +1711,90 @@ PBN_INLINE int pbn_asm_rows(pbn_size n) {
 #endif
 }
 
+/* small square products & squares by columns ("comba"): each result limb at once, from
+   a 3-limb accumulator, instead of rows of partial products written & read back - fully
+   unrolled for each size (with the loops' bounds changing on every column, a loop would
+   mostly be busy mispredicting them); with a double limb type, and GCC or Clang to unroll them */
+#if (defined(__GNUC__) || defined(__clang__)) && defined(PBN_HAVE_DLIMB)
+#  define PBN_HAVE_COMBA 1
+#  define PBN_UNROLL _Pragma("GCC unroll 32")
+#  ifndef PBN_MUL_COMBA_MAX
+#    define PBN_MUL_COMBA_MAX 12
+#  endif
+#  ifndef PBN_SQR_COMBA_MAX
+#    define PBN_SQR_COMBA_MAX 12
+#  endif
+
+/* (c2, c1, c0) += (hi, lo) */
+#  define PBN_ACC_ADD(lo, hi) do { pbn_dlimb p_ = ((pbn_dlimb)(hi) << PBN_B) | (lo); \
+       pbn_dlimb a_ = ((pbn_dlimb)c1 << PBN_B) | c0; a_ += p_; c2 += a_ < p_; \
+       c0 = (pbn_limb)a_; c1 = (pbn_limb)(a_ >> PBN_B); } while (0)
+
+PBN_INLINE void pbn_mul_comba_n(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, const pbn_size n) {
+    pbn_limb c0 = 0, c1 = 0, c2 = 0, lo, hi;
+    pbn_size k, i;
+    PBN_UNROLL
+    for (k = 0; k < 2 * n - 1; k++) {
+        PBN_UNROLL
+        for (i = (k < n ? 0 : k - n + 1); i <= (k < n ? k : n - 1); i++) {
+            lo = pbn_umul(ap[i], bp[k - i], &hi);
+            PBN_ACC_ADD(lo, hi);
+        }
+        rp[k] = c0; c0 = c1; c1 = c2; c2 = 0;
+    }
+    rp[2 * n - 1] = c0;
+}
+
+/* the cross products of each column once (then doubled), plus the square on the diagonal */
+PBN_INLINE void pbn_sqr_comba_n(pbn_limb *rp, const pbn_limb *ap, const pbn_size n) {
+    pbn_limb c0 = 0, c1 = 0, c2 = 0, lo, hi;
+    pbn_size k, i;
+    PBN_UNROLL
+    for (k = 0; k < 2 * n - 1; k++) {
+        pbn_limb s0 = c0, s1 = c1, s2 = c2, cy;
+        c0 = c1 = c2 = 0;
+        PBN_UNROLL
+        for (i = (k < n ? 0 : k - n + 1); i < k - i; i++) {
+            lo = pbn_umul(ap[i], ap[k - i], &hi);
+            PBN_ACC_ADD(lo, hi);
+        }
+        c2 = (c2 << 1) | (c1 >> (PBN_B - 1));
+        c1 = (c1 << 1) | (c0 >> (PBN_B - 1));
+        c0 <<= 1;
+        if (!(k & 1)) {
+            lo = pbn_umul(ap[k / 2], ap[k / 2], &hi);
+            PBN_ACC_ADD(lo, hi);
+        }
+        c0 = pbn_addc(c0, s0, 0, &cy);
+        c1 = pbn_addc(c1, s1, cy, &cy);
+        c2 += s2 + cy;
+        rp[k] = c0; c0 = c1; c1 = c2; c2 = 0;
+    }
+    rp[2 * n - 1] = c0;
+}
+
+/* (n: 2..12) */
+#  define PBN_COMBA_CASES(F, ...) \
+    case 2: F(__VA_ARGS__, 2); return 1;   case 3: F(__VA_ARGS__, 3); return 1; \
+    case 4: F(__VA_ARGS__, 4); return 1;   case 5: F(__VA_ARGS__, 5); return 1; \
+    case 6: F(__VA_ARGS__, 6); return 1;   case 7: F(__VA_ARGS__, 7); return 1; \
+    case 8: F(__VA_ARGS__, 8); return 1;   case 9: F(__VA_ARGS__, 9); return 1; \
+    case 10: F(__VA_ARGS__, 10); return 1; case 11: F(__VA_ARGS__, 11); return 1; \
+    case 12: F(__VA_ARGS__, 12); return 1;
+
+static int pbn_n_mul_comba(pbn_limb *rp, const pbn_limb *ap, const pbn_limb *bp, pbn_size n) {
+    switch (n) { PBN_COMBA_CASES(pbn_mul_comba_n, rp, ap, bp) default: return 0; }
+}
+
+static int pbn_n_sqr_comba(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
+    switch (n) { PBN_COMBA_CASES(pbn_sqr_comba_n, rp, ap) default: return 0; }
+}
+#endif
+
 static void pbn_n_mul_basecase(pbn_limb *rp, const pbn_limb *ap, pbn_size an, const pbn_limb *bp, pbn_size bn) {
+#if defined(PBN_HAVE_COMBA)
+    if (an == bn && an <= PBN_MUL_COMBA_MAX && pbn_n_mul_comba(rp, ap, bp, an)) return;
+#endif
     pbn_size i = 1;
     rp[an] = pbn_n_mul_1(rp, ap, an, bp[0]);
 #if defined(PBN_HAVE_ADDMUL_2)
@@ -1727,6 +1810,9 @@ static void pbn_n_sqr_basecase(pbn_limb *rp, const pbn_limb *ap, pbn_size n) {
     pbn_size i;
     pbn_limb cy, hi, lo;
     if (n == 1) { rp[0] = pbn_umul(ap[0], ap[0], &rp[1]); return; }
+#if defined(PBN_HAVE_COMBA)
+    if (n <= PBN_SQR_COMBA_MAX && pbn_n_sqr_comba(rp, ap, n)) return;
+#endif
     /* off-diagonal products */
     rp[0] = 0;
     rp[n] = pbn_n_mul_1(rp + 1, ap + 1, n - 1, ap[0]);
