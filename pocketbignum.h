@@ -3963,8 +3963,9 @@ static pbn_limb pbn_n_mod_1_4(const pbn_limb *np, pbn_size n, pbn_limb d) {
 
 PBN_DEF void pbz_divexact(pbz_ptr q, pbz_srcptr n, pbz_srcptr d) {
     pbn_size nn = PBN_ABS(SIZ(n));
-    if (PBN_ABS(SIZ(d)) == 1 && nn > 0) {
-        /* a single-limb divisor: d = d' 2^z, with d' odd */
+    if (PBN_ABS(SIZ(d)) == 1 && nn > 2) {
+        /* a single-limb divisor (of a number that isn't tiny: those are quicker as they
+           were, with a division): d = d' 2^z, with d' odd */
         pbn_limb dv = PTR(d)[0], *qp;
         int z = pbn_ctz(dv), neg = (SIZ(n) < 0) != (SIZ(d) < 0);
         if (dv == 1) { pbz_set(q, n); if (SIZ(d) < 0) pbz_neg(q, q); return; }
@@ -5129,7 +5130,7 @@ PBN_DEF void pbz_gcd(pbz_ptr g, pbz_srcptr a, pbz_srcptr b) {
         return;
     }
 #endif
-    if ((an == 1) != (bn == 1)) {
+    if ((an == 1) != (bn == 1) && PBN_MAX(an, bn) > 2) {
         /* a single limb & a bigger one: one pass over the big one, without any division -
            gcd(n, d) = 2^min(ctz n, ctz d) gcd(n, d') with d' = d's odd part, and that's
            gcd(r, d'), with r from modexact */
