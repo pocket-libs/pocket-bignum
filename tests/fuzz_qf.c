@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <math.h>
 #include <float.h>
 
@@ -563,6 +564,85 @@ static void t_rat(void) {
     mpq_clears(ga, gb, e, NULL); pbq_clears(a, b, r, NULL);
 }
 
+/* the functions added for completeness */
+static void t_float_more(void) {
+    mpfr_t ga, gb, e; pbf_t a, b, r;
+    mpz_t gz; pbz_t z;
+    mpfr_prec_t p = gen_prec();
+    mpfr_rnd_t rm = gen_rnd();
+    unsigned long u;
+    long sl;
+    int t1, t2;
+    mpfr_inits2(53, ga, gb, e, (mpfr_ptr)0);
+    pbf_init(a); pbf_init(b); pbf_init2(r, p); mpfr_set_prec(e, p);
+    mpz_init(gz); pbz_init(z);
+    gen_f(ga, gen_prec());
+    gen_f(gb, rndn(4) ? gen_prec() : mpfr_get_prec(ga));
+    if (rndn(6) == 0) mpfr_set(gb, ga, MPFR_RNDN);
+    if (rndn(8) == 0 && mpfr_regular_p(ga)) mpfr_neg(gb, ga, MPFR_RNDN);
+    f_from_mpfr(a, ga); f_from_mpfr(b, gb);
+    nctx = 2; fctx(0, ga); fctx(1, gb);
+    switch (rndn(4)) {
+        case 0:  u = 0; break;
+        case 1:  u = rndn(10); break;
+        case 2:  u = ULONG_MAX - rndn(3); break;
+        default: u = (unsigned long)rnd() >> rndn(64); break;
+    }
+    switch (rndn(4)) {
+        case 0:  sl = 0; break;
+        case 1:  sl = (long)rndn(20) - 10; break;
+        case 2:  sl = rndn(2) ? LONG_MIN : LONG_MAX; break;
+        default: sl = (long)rnd() >> rndn(64); break;
+    }
+
+#define FOP(name, pcall, mcall) do { cur_op = name; t2 = mcall; t1 = pcall; fcheck(name, r, e); tcheck(name, t1, t2); } while (0)
+    FOP("add_ui", pbf_add_ui(r, a, u, (pbf_rnd_t)rm), mpfr_add_ui(e, ga, u, rm));
+    FOP("add_si", pbf_add_si(r, a, sl, (pbf_rnd_t)rm), mpfr_add_si(e, ga, sl, rm));
+    FOP("sub_ui", pbf_sub_ui(r, a, u, (pbf_rnd_t)rm), mpfr_sub_ui(e, ga, u, rm));
+    FOP("sub_si", pbf_sub_si(r, a, sl, (pbf_rnd_t)rm), mpfr_sub_si(e, ga, sl, rm));
+    FOP("ui_sub", pbf_ui_sub(r, u, a, (pbf_rnd_t)rm), mpfr_ui_sub(e, u, ga, rm));
+    FOP("si_sub", pbf_si_sub(r, sl, a, (pbf_rnd_t)rm), mpfr_si_sub(e, sl, ga, rm));
+    FOP("mul_ui", pbf_mul_ui(r, a, u, (pbf_rnd_t)rm), mpfr_mul_ui(e, ga, u, rm));
+    FOP("mul_si", pbf_mul_si(r, a, sl, (pbf_rnd_t)rm), mpfr_mul_si(e, ga, sl, rm));
+    FOP("div_ui", pbf_div_ui(r, a, u, (pbf_rnd_t)rm), mpfr_div_ui(e, ga, u, rm));
+    FOP("div_si", pbf_div_si(r, a, sl, (pbf_rnd_t)rm), mpfr_div_si(e, ga, sl, rm));
+    FOP("ui_div", pbf_ui_div(r, u, a, (pbf_rnd_t)rm), mpfr_ui_div(e, u, ga, rm));
+    FOP("si_div", pbf_si_div(r, sl, a, (pbf_rnd_t)rm), mpfr_si_div(e, sl, ga, rm));
+    FOP("sqr", pbf_sqr(r, a, (pbf_rnd_t)rm), mpfr_sqr(e, ga, rm));
+    FOP("min", pbf_min(r, a, b, (pbf_rnd_t)rm), mpfr_min(e, ga, gb, rm));
+    FOP("max", pbf_max(r, a, b, (pbf_rnd_t)rm), mpfr_max(e, ga, gb, rm));
+    FOP("setsign", pbf_setsign(r, a, (int)(u & 1), (pbf_rnd_t)rm), mpfr_setsign(e, ga, (int)(u & 1), rm));
+    FOP("copysign", pbf_copysign(r, a, b, (pbf_rnd_t)rm), mpfr_copysign(e, ga, gb, rm));
+#undef FOP
+    /* (the exact return value, not just its sign) */
+    cur_op = "floor"; t2 = mpfr_floor(e, ga); t1 = pbf_floor(r, a); fcheck(cur_op, r, e); check_int(cur_op, t1, t2);
+    cur_op = "ceil";  t2 = mpfr_ceil(e, ga);  t1 = pbf_ceil(r, a);  fcheck(cur_op, r, e); check_int(cur_op, t1, t2);
+    cur_op = "trunc"; t2 = mpfr_trunc(e, ga); t1 = pbf_trunc(r, a); fcheck(cur_op, r, e); check_int(cur_op, t1, t2);
+
+    mpfr_clear_flags();
+    cur_op = "cmpabs";         check_int(cur_op, sgn(pbf_cmpabs(a, b)), sgn(mpfr_cmpabs(ga, gb)));
+    cur_op = "greater_p";      check_int(cur_op, pbf_greater_p(a, b), mpfr_greater_p(ga, gb));
+    cur_op = "greaterequal_p"; check_int(cur_op, pbf_greaterequal_p(a, b), mpfr_greaterequal_p(ga, gb));
+    cur_op = "less_p";         check_int(cur_op, pbf_less_p(a, b), mpfr_less_p(ga, gb));
+    cur_op = "lessequal_p";    check_int(cur_op, pbf_lessequal_p(a, b), mpfr_lessequal_p(ga, gb));
+    cur_op = "lessgreater_p";  check_int(cur_op, pbf_lessgreater_p(a, b), mpfr_lessgreater_p(ga, gb));
+    cur_op = "equal_p";        check_int(cur_op, pbf_equal_p(a, b), mpfr_equal_p(ga, gb));
+    cur_op = "unordered_p";    check_int(cur_op, pbf_unordered_p(a, b), mpfr_unordered_p(ga, gb));
+    cur_op = "integer_p";      check_int(cur_op, pbf_integer_p(a), mpfr_integer_p(ga));
+
+    if (mpfr_number_p(ga) && mpfr_get_exp(ga) < 4000) {
+        cur_op = "get_z"; t2 = mpfr_get_z(gz, ga, rm); t1 = pbf_get_z(z, a, (pbf_rnd_t)rm);
+        { mpz_t x; mpz_init(x); z_to_gmp(x, z); check_int(cur_op, mpz_cmp(x, gz) == 0, 1); mpz_clear(x); }
+        tcheck(cur_op, t1, t2);
+    }
+    cur_op = "get_si"; check_int(cur_op, pbf_get_si(a, (pbf_rnd_t)rm), mpfr_get_si(ga, rm));
+    cur_op = "get_ui"; check_int(cur_op, (long)pbf_get_ui(a, (pbf_rnd_t)rm), (long)mpfr_get_ui(ga, rm));
+
+    mpfr_clears(ga, gb, e, (mpfr_ptr)0);
+    pbf_clear(a); pbf_clear(b); pbf_clear(r);
+    mpz_clear(gz); pbz_clear(z);
+}
+
 int main(int argc, char **argv) {
     unsigned long iters = argc > 1 ? strtoul(argv[1], NULL, 10) : 20000, it;
     unsigned long long seed = argc > 2 ? strtoull(argv[2], NULL, 10) : 1;
@@ -577,6 +657,7 @@ int main(int argc, char **argv) {
         t_float_str_ties();
         t_float_str_ties();
         if (it % 2 == 0) t_pow();
+        t_float_more();
         if ((it + 1) % 5000 == 0) { printf("  %lu iterations, %llu checks ok\n", it + 1, checks); fflush(stdout); }
     }
     pbf_free_cache();
