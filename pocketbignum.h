@@ -1469,6 +1469,7 @@ static pbn_limb pbn_n_rshift(pbn_limb *rp, const pbn_limb *ap, pbn_size n, unsig
 
 /* ---- single-limb division (Möller–Granlund, "Improved division by invariant integers") ---- */
 
+#if PBN_B != 64
 /* plain 2-by-1 division, d normalized, n1 < d (used only to compute inverses) */
 static pbn_limb pbn_udiv_qrnnd(pbn_limb *r, pbn_limb n1, pbn_limb n0, pbn_limb d) {
 #if defined(PBN_HAVE_DLIMB)
@@ -1493,6 +1494,7 @@ static pbn_limb pbn_udiv_qrnnd(pbn_limb *r, pbn_limb n1, pbn_limb n0, pbn_limb d
     return (q1 << H) | q0;
 #endif
 }
+#endif
 
 /* v = floor((B^2 - 1) / d) - B, d normalized */
 #if PBN_B == 64
@@ -4830,12 +4832,6 @@ static uint64_t pbn_getbits64(const pbn_limb *p, pbn_size n, pbn_bitcnt shift) {
     return r;
 }
 
-/* rp = |x*a - y*b| style 2x2 update helper: rp[0..n) = xa - yb where result >= 0 */
-static void pbn_lin2(pbn_limb *rp, pbn_limb x, const pbn_limb *ap, pbn_limb y, const pbn_limb *bp, pbn_size n) {
-    pbn_n_mul_1(rp, ap, n, x);
-    pbn_n_submul_1(rp, bp, n, y);
-}
-
 #define PBN_LEHMER_BITS (PBN_B - 2)
 
 #if PBN_B == 64 && defined(__SIZEOF_INT128__) && !defined(PBN_PORTABLE)
@@ -4879,6 +4875,12 @@ static void pbn_lin2x2(pbn_limb *na, pbn_limb *nb, const pbn_limb *ap, const pbn
         lo = u - v; c1p = (pbn_limb)(p1 >> 64); c1q = (pbn_limb)(q1 >> 64);
         nb[i] = lo - w1; w1 = (u < v) + (lo < w1);
     }
+}
+#else
+/* rp = |x*a - y*b| style 2x2 update helper: rp[0..n) = xa - yb where result >= 0 */
+static void pbn_lin2(pbn_limb *rp, pbn_limb x, const pbn_limb *ap, pbn_limb y, const pbn_limb *bp, pbn_size n) {
+    pbn_n_mul_1(rp, ap, n, x);
+    pbn_n_submul_1(rp, bp, n, y);
 }
 #endif
 
@@ -5085,17 +5087,6 @@ static void pbn_hmat_lmul(pbn_hmat *m, const pbn_hmat *a, pbz_ptr t) {
     pbz_mul(r[3], a->u[2], m->u[1]); pbz_mul(t, a->u[3], m->u[3]); pbz_add(r[3], r[3], t);
     for (i = 0; i < 4; i++) { pbz_swap(m->u[i], r[i]); pbz_clear(r[i]); }
     m->s *= a->s;
-}
-
-/* (a, b) <- T (a, b) if both results are >= 0 (returns 1), else leaves them (returns 0) */
-static int pbn_hmat_apply(const pbn_hmat *m, pbz_ptr a, pbz_ptr b, pbz_ptr t0, pbz_ptr t1, pbz_ptr t2) {
-    pbz_mul(t0, m->u[0], a); pbz_mul(t2, m->u[1], b); pbz_sub(t0, t0, t2);
-    pbz_mul(t1, m->u[3], b); pbz_mul(t2, m->u[2], a); pbz_sub(t1, t1, t2);
-    if (m->s < 0) { pbz_neg(t0, t0); pbz_neg(t1, t1); }
-    if (SIZ(t0) < 0 || SIZ(t1) < 0) return 0;
-    pbz_swap(a, t0);
-    pbz_swap(b, t1);
-    return 1;
 }
 
 /* (a, b) <- T (a, b) for a = ah' B^p + al, b = bh' B^p + bl, where (ah', bh') = T (ah, bh)
